@@ -70,7 +70,7 @@ describe("inspectProject", () => {
     await writeFile(join(testDir, "index.ts"), "console.log('hi')");
 
     const config = await inspectProject(testDir);
-    expect(config.name).toBe(testDir.split("/").pop());
+    expect(config.name).toBe(testDir.split("/").pop()!);
   });
 
   test("detects port from Bun.serve({ port: N })", async () => {

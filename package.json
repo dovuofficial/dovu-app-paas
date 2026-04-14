@@ -15,6 +15,11 @@
     "commander": "^14.0.3",
     "ssh2": "^1.17.0"
   },
+  "scripts": {
+    "test": "bun test",
+    "dev": "bun run src/cli/index.ts",
+    "typecheck": "bun x tsc --noEmit"
+  },
   "bin": {
     "deploy-ops": "./src/cli/index.ts"
   }
