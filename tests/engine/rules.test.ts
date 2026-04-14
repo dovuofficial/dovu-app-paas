@@ -82,4 +82,39 @@ describe("inspectProject", () => {
     expect(config.port).toBe(5555);
     expect(config.entrypoint).toBe("server.ts");
   });
+
+  test("detects Next.js from next in dependencies", async () => {
+    await writeFile(join(testDir, "package.json"), JSON.stringify({
+      name: "my-next-app",
+      dependencies: { next: "14.0.0", react: "18.0.0" },
+    }));
+    await writeFile(join(testDir, "next.config.js"), "module.exports = {}");
+
+    const config = await inspectProject(testDir);
+    expect(config.framework).toBe("nextjs");
+    expect(config.runtime).toBe("node");
+    expect(config.port).toBe(3000);
+  });
+
+  test("detects Laravel from artisan file", async () => {
+    await writeFile(join(testDir, "artisan"), "#!/usr/bin/env php");
+    await writeFile(join(testDir, "composer.json"), JSON.stringify({
+      require: { "laravel/framework": "^11.0" },
+    }));
+
+    const config = await inspectProject(testDir);
+    expect(config.framework).toBe("laravel");
+    expect(config.runtime).toBe("php");
+    expect(config.port).toBe(8000);
+    expect(config.entrypoint).toBe("artisan");
+  });
+
+  test("plain bun project has framework none", async () => {
+    await writeFile(join(testDir, "package.json"), JSON.stringify({ name: "myapp" }));
+    await writeFile(join(testDir, "bun.lockb"), "");
+    await writeFile(join(testDir, "index.ts"), "console.log('hi')");
+
+    const config = await inspectProject(testDir);
+    expect(config.framework).toBe("none");
+  });
 });

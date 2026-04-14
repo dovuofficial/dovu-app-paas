@@ -31,6 +31,7 @@ export const deployCommand = new Command("deploy")
     const appName = options.name || deployConfig.name;
 
     console.log(`  Runtime: ${deployConfig.runtime}`);
+    if (deployConfig.framework !== "none") console.log(`  Framework: ${deployConfig.framework}`);
     console.log(`  Entrypoint: ${deployConfig.entrypoint}`);
     console.log(`  Port: ${deployConfig.port}`);
 
@@ -39,6 +40,7 @@ export const deployCommand = new Command("deploy")
     console.log("\nBuilding image...");
     await buildImage(cwd, imageTag, deployConfig.dockerfile, {
       runtime: deployConfig.runtime,
+      framework: deployConfig.framework,
       entrypoint: deployConfig.entrypoint,
       port: deployConfig.port,
     });

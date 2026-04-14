@@ -13,6 +13,37 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+async function detectFramework(
+  projectDir: string
+): Promise<{ framework: "none" | "nextjs" | "laravel"; runtime: "bun" | "node" | "php" }> {
+  // Check for Laravel: artisan file or composer.json with laravel/framework
+  if (await fileExists(join(projectDir, "artisan"))) {
+    return { framework: "laravel", runtime: "php" };
+  }
+  try {
+    const composer = JSON.parse(await readFile(join(projectDir, "composer.json"), "utf-8"));
+    if (composer.require?.["laravel/framework"]) {
+      return { framework: "laravel", runtime: "php" };
+    }
+  } catch {}
+
+  // Check for Next.js: next.config.* or next in dependencies
+  for (const cfg of ["next.config.js", "next.config.mjs", "next.config.ts"]) {
+    if (await fileExists(join(projectDir, cfg))) {
+      return { framework: "nextjs", runtime: "node" };
+    }
+  }
+  try {
+    const pkg = JSON.parse(await readFile(join(projectDir, "package.json"), "utf-8"));
+    if (pkg.dependencies?.next) {
+      return { framework: "nextjs", runtime: "node" };
+    }
+  } catch {}
+
+  // Default: detect bun vs node
+  return { framework: "none", runtime: await detectRuntime(projectDir) };
+}
+
 async function detectRuntime(projectDir: string): Promise<"bun" | "node"> {
   if (await fileExists(join(projectDir, "bun.lockb"))) return "bun";
 
@@ -24,13 +55,18 @@ async function detectRuntime(projectDir: string): Promise<"bun" | "node"> {
   return "bun"; // default
 }
 
-async function findEntrypoint(projectDir: string): Promise<string> {
+async function findEntrypoint(
+  projectDir: string,
+  framework: "none" | "nextjs" | "laravel"
+): Promise<string> {
+  if (framework === "nextjs") return "package.json"; // next start uses package.json scripts
+  if (framework === "laravel") return "artisan"; // php artisan serve
+
   // Check package.json scripts.start
   try {
     const pkg = JSON.parse(await readFile(join(projectDir, "package.json"), "utf-8"));
     const startScript = pkg.scripts?.start;
     if (startScript) {
-      // Extract filename from "bun run index.ts" or "node server.js"
       const match = startScript.match(/(?:bun\s+run|node)\s+(\S+)/);
       if (match) {
         const candidate = match[1];
@@ -53,11 +89,17 @@ async function findEntrypoint(projectDir: string): Promise<string> {
   return "index.ts"; // fallback
 }
 
-async function detectPort(projectDir: string, entrypoint: string): Promise<number> {
+async function detectPort(
+  projectDir: string,
+  entrypoint: string,
+  framework: "none" | "nextjs" | "laravel"
+): Promise<number> {
+  if (framework === "nextjs") return 3000;
+  if (framework === "laravel") return 8000;
+
   try {
     const content = await readFile(join(projectDir, entrypoint), "utf-8");
 
-    // Match Bun.serve({ port: N }) or .listen(N)
     const bunServeMatch = content.match(/port:\s*(\d+)/);
     if (bunServeMatch) return parseInt(bunServeMatch[1], 10);
 
@@ -74,11 +116,11 @@ async function detectDockerfile(projectDir: string): Promise<string | null> {
 }
 
 export async function inspectProject(projectDir: string): Promise<DeploymentConfig> {
-  const runtime = await detectRuntime(projectDir);
-  const entrypoint = await findEntrypoint(projectDir);
-  const port = await detectPort(projectDir, entrypoint);
+  const { framework, runtime } = await detectFramework(projectDir);
+  const entrypoint = await findEntrypoint(projectDir, framework);
+  const port = await detectPort(projectDir, entrypoint, framework);
   const dockerfile = await detectDockerfile(projectDir);
   const name = basename(projectDir);
 
-  return { name, runtime, entrypoint, port, dockerfile };
+  return { name, runtime, framework, entrypoint, port, dockerfile };
 }
