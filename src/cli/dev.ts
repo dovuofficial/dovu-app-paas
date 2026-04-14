@@ -5,6 +5,8 @@ import { join, resolve } from "path";
 import { $ } from "bun";
 import { inspectProject } from "@/engine/rules";
 import { buildImage } from "@/engine/docker";
+import { readConfig, readState, writeState } from "@/engine/state";
+import { resolveProvider } from "@/providers/resolve";
 
 function parseEnvFile(content: string): Record<string, string> {
   const env: Record<string, string> = {};
@@ -76,14 +78,50 @@ export const devCommand = new Command("dev")
     });
     console.log(chalk.green("  Built: " + imageTag));
 
-    // 4. Stop any existing dev container
+    // 4. Stop any existing deployed container for this app (free the port)
+    const config = await readConfig(cwd);
+    if (config) {
+      try {
+        const provider = resolveProvider(config);
+        const deployedName = `deploy-ops-${appName}`;
+        await provider.exec(`docker stop ${deployedName}`);
+        console.log(chalk.yellow(`  Stopped deployed ${appName} to free port`));
+
+        // Update state to reflect stopped status
+        const state = await readState(cwd);
+        if (state.deployments[appName]) {
+          state.deployments[appName].status = "stopped";
+          state.deployments[appName].updatedAt = new Date().toISOString();
+          await writeState(cwd, state);
+        }
+      } catch {
+        // No deployed container — that's fine
+      }
+    }
+
+    // Also stop any existing dev container
     const containerName = `deploy-ops-dev-${appName}`;
     try {
       await $`docker rm -f ${containerName}`.quiet();
     } catch {}
 
-    // 5. Run with volume mount + watch mode
-    const hostPort = options.port ? parseInt(options.port, 10) : deployConfig.port;
+    // 5. Find a free port — try the app's port, then scan upward
+    let hostPort = options.port ? parseInt(options.port, 10) : deployConfig.port;
+    if (!options.port) {
+      // Check if the port is in use on the host
+      try {
+        const check = Bun.spawn(["lsof", "-i", `:${hostPort}`, "-t"], { stdout: "pipe", stderr: "pipe" });
+        const output = await new Response(check.stdout).text();
+        if (output.trim()) {
+          // Port is in use, find a free one
+          for (let p = hostPort + 1; p < hostPort + 100; p++) {
+            const c = Bun.spawn(["lsof", "-i", `:${p}`, "-t"], { stdout: "pipe", stderr: "pipe" });
+            const o = await new Response(c.stdout).text();
+            if (!o.trim()) { hostPort = p; break; }
+          }
+        }
+      } catch {}
+    }
     const watchCmd = getWatchCmd(deployConfig.runtime, deployConfig.framework, deployConfig.entrypoint);
     const envFlags = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
 
