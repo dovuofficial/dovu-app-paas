@@ -6,6 +6,7 @@ import type { Provider } from "./provider";
 export class DigitalOceanProvider implements Provider {
   readonly name = "digitalocean";
   readonly baseDomain: string;
+  readonly nginxConfDir = "/etc/nginx/conf.d";
   private host: string;
   private user: string;
   private sshKeyPath: string;

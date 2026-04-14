@@ -52,17 +52,16 @@ export const deployCommand = new Command("deploy")
     await rm(tarballPath, { force: true });
     console.log(chalk.green("  Transferred"));
 
-    // 4. Handle re-deploy: stop and remove old container
+    // 4. Handle re-deploy: stop and remove old container by name
     const state = await readState(cwd);
     const existing = state.deployments[appName];
-    if (existing) {
-      console.log("Replacing existing deployment...");
-      try {
-        await provider.exec(`docker stop ${existing.containerId}`);
-        await provider.exec(`docker rm ${existing.containerId}`);
-      } catch {
-        // Container may already be gone
-      }
+    const containerName = `deploy-ops-${appName}`;
+    try {
+      await provider.exec(`docker stop ${containerName}`);
+      await provider.exec(`docker rm ${containerName}`);
+      if (existing) console.log("Replacing existing deployment...");
+    } catch {
+      // Container may not exist — that's fine
     }
 
     // 5. Start container
@@ -80,7 +79,7 @@ export const deployCommand = new Command("deploy")
     const nginxConf = generateNginxConfig({ serverName: domain, hostPort });
     console.log("Configuring nginx...");
     await provider.exec(
-      `cat > /etc/nginx/conf.d/deploy-ops-${appName}.conf << 'NGINX_EOF'\n${nginxConf}\nNGINX_EOF`
+      `cat > ${provider.nginxConfDir}/deploy-ops-${appName}.conf << 'NGINX_EOF'\n${nginxConf}\nNGINX_EOF`
     );
     await provider.exec("nginx -s reload");
     console.log(chalk.green("  Configured"));

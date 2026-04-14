@@ -60,7 +60,7 @@ export const destroyCommand = new Command("destroy")
     console.log(chalk.green("✓") + " Image removed");
 
     // Remove nginx config
-    await provider.exec(`rm -f /etc/nginx/conf.d/deploy-ops-${app}.conf /etc/nginx/conf.d/deploy-ops-${app}.conf.disabled`);
+    await provider.exec(`rm -f ${provider.nginxConfDir}/deploy-ops-${app}.conf ${provider.nginxConfDir}/deploy-ops-${app}.conf.disabled`);
     await provider.exec("nginx -s reload");
     console.log(chalk.green("✓") + " Nginx config removed");
 

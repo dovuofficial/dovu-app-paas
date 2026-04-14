@@ -32,7 +32,7 @@ export const stopCommand = new Command("stop")
 
     // Disable nginx config (rename to .disabled)
     await provider.exec(
-      `mv /etc/nginx/conf.d/deploy-ops-${app}.conf /etc/nginx/conf.d/deploy-ops-${app}.conf.disabled 2>/dev/null || true`
+      `mv ${provider.nginxConfDir}/deploy-ops-${app}.conf ${provider.nginxConfDir}/deploy-ops-${app}.conf.disabled 2>/dev/null || true`
     );
     await provider.exec("nginx -s reload");
     console.log(chalk.green("✓") + " Nginx config disabled");

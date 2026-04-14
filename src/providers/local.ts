@@ -6,6 +6,7 @@ const CONTAINER_NAME = "deploy-ops-mini-droplet";
 export class LocalProvider implements Provider {
   readonly name = "local";
   readonly baseDomain: string;
+  readonly nginxConfDir = "/etc/nginx/http.d";
 
   constructor(baseDomain: string) {
     this.baseDomain = baseDomain;
@@ -49,9 +50,11 @@ export class LocalProvider implements Provider {
   }
 
   async transferImage(tarballPath: string): Promise<void> {
-    await $`docker cp ${tarballPath} ${CONTAINER_NAME}:/tmp/image.tar`.quiet();
-    await $`docker exec ${CONTAINER_NAME} docker load -i /tmp/image.tar`.quiet();
-    await $`docker exec ${CONTAINER_NAME} rm /tmp/image.tar`.quiet();
+    // Use /root/ instead of /tmp/ — DinD images often mount /tmp as tmpfs
+    // which makes files copied via docker cp invisible inside the container
+    await $`docker cp ${tarballPath} ${CONTAINER_NAME}:/root/image.tar`.quiet();
+    await $`docker exec ${CONTAINER_NAME} docker load -i /root/image.tar`.quiet();
+    await $`docker exec ${CONTAINER_NAME} rm /root/image.tar`.quiet();
   }
 
   async exec(command: string): Promise<string> {
