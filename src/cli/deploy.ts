@@ -64,8 +64,18 @@ export const deployCommand = new Command("deploy")
       // Container may not exist — that's fine
     }
 
-    // 5. Start container
-    const hostPort = existing?.hostPort || await getNextPort(cwd);
+    // 5. Start container — find a free port by querying the provider
+    let hostPort = existing?.hostPort || await getNextPort(cwd);
+    // Check for ports actually in use on the target (other projects may use different state files)
+    try {
+      const portsOutput = await provider.exec(
+        `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*0\\.0\\.0\\.0:\\([0-9]*\\).*/\\1/p' | sort -u`
+      );
+      const used = new Set(portsOutput.trim().split("\n").filter(Boolean).map(Number));
+      while (used.has(hostPort)) hostPort++;
+    } catch {
+      // If we can't query, proceed with the calculated port
+    }
     console.log("Starting container...");
     const containerId = (
       await provider.exec(
