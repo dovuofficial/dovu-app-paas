@@ -1,9 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { readConfig, readState, writeState } from "@/engine/state";
-import { LocalProvider } from "@/providers/local";
-import { DigitalOceanProvider } from "@/providers/digitalocean";
-import type { Provider } from "@/providers/provider";
+import { resolveProvider } from "@/providers/resolve";
 
 const readline = await import("readline");
 
@@ -15,13 +13,6 @@ function prompt(question: string): Promise<string> {
       resolve(answer.trim());
     });
   });
-}
-
-function getProvider(config: any): Provider {
-  if (config.provider === "local") {
-    return new LocalProvider(config.local.baseDomain);
-  }
-  return new DigitalOceanProvider(config.digitalocean);
 }
 
 export const destroyCommand = new Command("destroy")
@@ -50,7 +41,7 @@ export const destroyCommand = new Command("destroy")
       return;
     }
 
-    const provider = getProvider(config);
+    const provider = resolveProvider(config);
     const containerName = `deploy-ops-${app}`;
 
     // Remove container

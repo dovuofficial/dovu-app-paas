@@ -7,17 +7,8 @@ import { readConfig, readState, writeState, getNextPort } from "@/engine/state";
 import { inspectProject } from "@/engine/rules";
 import { buildImage, saveImage } from "@/engine/docker";
 import { generateNginxConfig } from "@/engine/nginx";
-import { LocalProvider } from "@/providers/local";
-import { DigitalOceanProvider } from "@/providers/digitalocean";
-import type { Provider } from "@/providers/provider";
+import { resolveProvider } from "@/providers/resolve";
 import type { DeploymentRecord } from "@/types";
-
-function getProvider(config: any): Provider {
-  if (config.provider === "local") {
-    return new LocalProvider(config.local.baseDomain);
-  }
-  return new DigitalOceanProvider(config.digitalocean);
-}
 
 export const deployCommand = new Command("deploy")
   .description("Deploy the current project")
@@ -32,7 +23,7 @@ export const deployCommand = new Command("deploy")
       process.exit(1);
     }
 
-    const provider = getProvider(config);
+    const provider = resolveProvider(config);
 
     // 1. Inspect project
     console.log("Inspecting project...");

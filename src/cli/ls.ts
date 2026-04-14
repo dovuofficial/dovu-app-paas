@@ -1,16 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { readConfig, readState } from "@/engine/state";
-import type { Provider } from "@/providers/provider";
-import { LocalProvider } from "@/providers/local";
-import { DigitalOceanProvider } from "@/providers/digitalocean";
-
-function getProvider(config: any): Provider {
-  if (config.provider === "local") {
-    return new LocalProvider(config.local.baseDomain);
-  }
-  return new DigitalOceanProvider(config.digitalocean);
-}
+import { resolveProvider } from "@/providers/resolve";
 
 function formatUptime(createdAt: string, status: string): string {
   if (status === "stopped") return "—";
@@ -44,7 +35,7 @@ export const lsCommand = new Command("ls")
     }
 
     // Reconcile status with live data
-    const provider = getProvider(config);
+    const provider = resolveProvider(config);
     for (const dep of deployments) {
       try {
         const running = await provider.exec(`docker inspect -f '{{.State.Running}}' deploy-ops-${dep.name}`);

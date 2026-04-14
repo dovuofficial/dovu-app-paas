@@ -1,16 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { readConfig, readState, writeState } from "@/engine/state";
-import { LocalProvider } from "@/providers/local";
-import { DigitalOceanProvider } from "@/providers/digitalocean";
-import type { Provider } from "@/providers/provider";
-
-function getProvider(config: any): Provider {
-  if (config.provider === "local") {
-    return new LocalProvider(config.local.baseDomain);
-  }
-  return new DigitalOceanProvider(config.digitalocean);
-}
+import { resolveProvider } from "@/providers/resolve";
 
 export const stopCommand = new Command("stop")
   .argument("<app>", "App name")
@@ -32,7 +23,7 @@ export const stopCommand = new Command("stop")
       process.exit(1);
     }
 
-    const provider = getProvider(config);
+    const provider = resolveProvider(config);
     const containerName = `deploy-ops-${app}`;
 
     // Stop container
