@@ -5,8 +5,10 @@ import { join, resolve } from "path";
 import { $ } from "bun";
 import { inspectProject } from "@/engine/rules";
 import { buildImage } from "@/engine/docker";
+import { generateNginxConfig } from "@/engine/nginx";
 import { readConfig, readState, writeState } from "@/engine/state";
 import { resolveProvider } from "@/providers/resolve";
+import type { Provider } from "@/providers/provider";
 
 function parseEnvFile(content: string): Record<string, string> {
   const env: Record<string, string> = {};
@@ -78,42 +80,46 @@ export const devCommand = new Command("dev")
     });
     console.log(chalk.green("  Built: " + imageTag));
 
-    // 4. Stop any existing deployed container for this app (free the port)
+    // 4. Stop any existing deployed container for this app
     const config = await readConfig(cwd);
-    if (config) {
-      try {
-        const provider = resolveProvider(config);
-        const deployedName = `deploy-ops-${appName}`;
-        await provider.exec(`docker stop ${deployedName}`);
-        console.log(chalk.yellow(`  Stopped deployed ${appName} to free port`));
+    let provider: Provider | null = null;
+    let domain = `${appName}.ops.localhost`;
 
-        // Update state to reflect stopped status
-        const state = await readState(cwd);
-        if (state.deployments[appName]) {
-          state.deployments[appName].status = "stopped";
-          state.deployments[appName].updatedAt = new Date().toISOString();
+    if (config) {
+      provider = resolveProvider(config);
+      const state = await readState(cwd);
+      const existing = state.deployments[appName];
+
+      if (existing) {
+        domain = existing.domain;
+      }
+
+      // Stop the deployed container inside the mini-droplet
+      try {
+        await provider.exec(`docker stop deploy-ops-${appName}`);
+        console.log(chalk.yellow(`  Stopped deployed ${appName}`));
+
+        if (existing) {
+          existing.status = "stopped";
+          existing.updatedAt = new Date().toISOString();
           await writeState(cwd, state);
         }
-      } catch {
-        // No deployed container — that's fine
-      }
+      } catch {}
     }
 
-    // Also stop any existing dev container
+    // Stop any existing dev container on host
     const containerName = `deploy-ops-dev-${appName}`;
     try {
       await $`docker rm -f ${containerName}`.quiet();
     } catch {}
 
-    // 5. Find a free port — try the app's port, then scan upward
+    // 5. Find a free host port
     let hostPort = options.port ? parseInt(options.port, 10) : deployConfig.port;
     if (!options.port) {
-      // Check if the port is in use on the host
       try {
         const check = Bun.spawn(["lsof", "-i", `:${hostPort}`, "-t"], { stdout: "pipe", stderr: "pipe" });
         const output = await new Response(check.stdout).text();
         if (output.trim()) {
-          // Port is in use, find a free one
           for (let p = hostPort + 1; p < hostPort + 100; p++) {
             const c = Bun.spawn(["lsof", "-i", `:${p}`, "-t"], { stdout: "pipe", stderr: "pipe" });
             const o = await new Response(c.stdout).text();
@@ -122,11 +128,29 @@ export const devCommand = new Command("dev")
         }
       } catch {}
     }
+
+    // 6. Point nginx in mini-droplet at host.docker.internal:hostPort
+    if (provider) {
+      const nginxConf = generateNginxConfig({
+        serverName: domain,
+        hostPort,
+        upstream: "host.docker.internal",
+      });
+      try {
+        await provider.exec(
+          `cat > ${provider.nginxConfDir}/deploy-ops-${appName}.conf << 'NGINX_EOF'\n${nginxConf}\nNGINX_EOF`
+        );
+        await provider.exec("nginx -s reload");
+      } catch {}
+    }
+
+    // 7. Run dev container on host Docker with volume mount
     const watchCmd = getWatchCmd(deployConfig.runtime, deployConfig.framework, deployConfig.entrypoint);
     const envFlags = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
 
-    console.log(`\n${chalk.green("✓")} Starting dev server...`);
-    console.log(`  URL: ${chalk.cyan(`http://localhost:${hostPort}`)}`);
+    console.log(`\n${chalk.green("✓")} Dev server starting...`);
+    console.log(`  URL: ${chalk.cyan(`http://${domain}`)}`);
+    console.log(`  Also: ${chalk.dim(`http://localhost:${hostPort}`)}`);
     console.log(`  Watch: ${watchCmd.join(" ")}`);
     console.log(`  Volume: ${cwd} → /app`);
     if (Object.keys(env).length > 0) console.log(`  Env: ${Object.keys(env).join(", ")}`);
@@ -149,10 +173,39 @@ export const devCommand = new Command("dev")
       }
     );
 
-    process.on("SIGINT", () => {
+    // On Ctrl+C: stop dev container, restore nginx to deployed container
+    async function cleanup() {
       proc.kill();
-      console.log(`\n${chalk.yellow("Stopped")} dev server for ${appName}`);
-    });
+      console.log(`\n${chalk.yellow("Stopping")} dev server...`);
 
+      // Restore nginx to point back at the deployed container if it exists
+      if (provider && config) {
+        const state = await readState(cwd);
+        const existing = state.deployments[appName];
+        if (existing) {
+          const nginxConf = generateNginxConfig({
+            serverName: domain,
+            hostPort: existing.hostPort,
+          });
+          try {
+            await provider.exec(
+              `cat > ${provider.nginxConfDir}/deploy-ops-${appName}.conf << 'NGINX_EOF'\n${nginxConf}\nNGINX_EOF`
+            );
+            // Restart the deployed container
+            await provider.exec(`docker start deploy-ops-${appName}`);
+            existing.status = "running";
+            existing.updatedAt = new Date().toISOString();
+            await writeState(cwd, state);
+            await provider.exec("nginx -s reload");
+            console.log(chalk.green("✓") + ` Restored deployed ${appName} at http://${domain}`);
+          } catch {
+            await provider.exec("nginx -s reload").catch(() => {});
+            console.log(chalk.yellow("  Could not restore deployed container. Run 'deploy-ops deploy' to redeploy."));
+          }
+        }
+      }
+    }
+
+    process.on("SIGINT", () => cleanup());
     await proc.exited;
   });
