@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { initCommand } from "./init";
 import { deployCommand } from "./deploy";
+import { devCommand } from "./dev";
 import { lsCommand } from "./ls";
 import { statusCommand } from "./status";
 import { logsCommand } from "./logs";
@@ -17,6 +18,7 @@ program
 
 program.addCommand(initCommand);
 program.addCommand(deployCommand);
+program.addCommand(devCommand);
 program.addCommand(lsCommand);
 program.addCommand(statusCommand);
 program.addCommand(logsCommand);
