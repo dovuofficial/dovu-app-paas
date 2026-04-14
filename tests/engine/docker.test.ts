@@ -26,7 +26,7 @@ describe("generateDockerfile", () => {
 
   test("generates Dockerfile for Laravel project", () => {
     const result = generateDockerfile({ runtime: "php", framework: "laravel", entrypoint: "artisan", port: 8000 });
-    expect(result).toContain("FROM php:8.3-cli");
+    expect(result).toContain("FROM php:8.4-cli");
     expect(result).toContain("composer install");
     expect(result).toContain("artisan");
     expect(result).toContain("EXPOSE 8000");

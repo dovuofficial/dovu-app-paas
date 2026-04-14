@@ -15,6 +15,7 @@ export interface DeploymentRecord {
   domain: string;
   containerId: string;
   status: "running" | "stopped";
+  env: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }

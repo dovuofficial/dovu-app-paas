@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { join } from "path";
 import { tmpdir } from "os";
-import { rm } from "fs/promises";
+import { readFile, rm } from "fs/promises";
 import { readConfig, readState, writeState, getNextPort } from "@/engine/state";
 import { inspectProject } from "@/engine/rules";
 import { buildImage, saveImage } from "@/engine/docker";
@@ -10,10 +10,35 @@ import { generateNginxConfig } from "@/engine/nginx";
 import { resolveProvider } from "@/providers/resolve";
 import type { DeploymentRecord } from "@/types";
 
+function parseEnvFile(content: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex === -1) continue;
+    const key = trimmed.slice(0, eqIndex).trim();
+    let value = trimmed.slice(eqIndex + 1).trim();
+    // Strip surrounding quotes
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    env[key] = value;
+  }
+  return env;
+}
+
+function buildEnvFlags(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`)
+    .join(" ");
+}
+
 export const deployCommand = new Command("deploy")
   .description("Deploy the current project")
   .option("--name <name>", "Override app name")
   .option("--domain <domain>", "Use a custom domain")
+  .option("-e, --env <KEY=VALUE...>", "Set environment variables", (val: string, acc: string[]) => { acc.push(val); return acc; }, [])
   .action(async (options) => {
     const cwd = process.cwd();
     const config = await readConfig(cwd);
@@ -35,7 +60,30 @@ export const deployCommand = new Command("deploy")
     console.log(`  Entrypoint: ${deployConfig.entrypoint}`);
     console.log(`  Port: ${deployConfig.port}`);
 
-    // 2. Build Docker image
+    // 2. Collect environment variables: .env file + CLI flags
+    const env: Record<string, string> = {};
+
+    // Read .env file if it exists
+    try {
+      const envContent = await readFile(join(cwd, ".env"), "utf-8");
+      Object.assign(env, parseEnvFile(envContent));
+    } catch {
+      // No .env file — that's fine
+    }
+
+    // CLI --env flags override .env file
+    for (const entry of options.env as string[]) {
+      const eqIndex = entry.indexOf("=");
+      if (eqIndex !== -1) {
+        env[entry.slice(0, eqIndex)] = entry.slice(eqIndex + 1);
+      }
+    }
+
+    if (Object.keys(env).length > 0) {
+      console.log(`  Env vars: ${Object.keys(env).join(", ")}`);
+    }
+
+    // 3. Build Docker image
     const imageTag = `deploy-ops-${appName}:${Date.now().toString(36)}`;
     console.log("\nBuilding image...");
     await buildImage(cwd, imageTag, deployConfig.dockerfile, {
@@ -46,7 +94,7 @@ export const deployCommand = new Command("deploy")
     });
     console.log(chalk.green("  Built: " + imageTag));
 
-    // 3. Save and transfer image
+    // 4. Save and transfer image
     const tarballPath = join(tmpdir(), `deploy-ops-${appName}.tar`);
     console.log("Shipping to target...");
     await saveImage(imageTag, tarballPath);
@@ -54,7 +102,7 @@ export const deployCommand = new Command("deploy")
     await rm(tarballPath, { force: true });
     console.log(chalk.green("  Transferred"));
 
-    // 4. Handle re-deploy: stop and remove old container by name
+    // 5. Handle re-deploy: stop and remove old container by name
     const state = await readState(cwd);
     const existing = state.deployments[appName];
     const containerName = `deploy-ops-${appName}`;
@@ -66,9 +114,8 @@ export const deployCommand = new Command("deploy")
       // Container may not exist — that's fine
     }
 
-    // 5. Start container — find a free port by querying the provider
+    // 6. Start container — find a free port by querying the provider
     let hostPort = existing?.hostPort || await getNextPort(cwd);
-    // Check for ports actually in use on the target (other projects may use different state files)
     try {
       const portsOutput = await provider.exec(
         `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*0\\.0\\.0\\.0:\\([0-9]*\\).*/\\1/p' | sort -u`
@@ -78,15 +125,17 @@ export const deployCommand = new Command("deploy")
     } catch {
       // If we can't query, proceed with the calculated port
     }
+
+    const envFlags = buildEnvFlags(env);
     console.log("Starting container...");
     const containerId = (
       await provider.exec(
-        `docker run -d --name deploy-ops-${appName} -p ${hostPort}:${deployConfig.port} ${imageTag}`
+        `docker run -d --name ${containerName} -p ${hostPort}:${deployConfig.port} ${envFlags} ${imageTag}`
       )
     ).trim();
     console.log(chalk.green("  Started: " + containerId.slice(0, 12)));
 
-    // 6. Configure nginx
+    // 7. Configure nginx
     const domain = options.domain || `${appName}.${provider.baseDomain}`;
     const nginxConf = generateNginxConfig({ serverName: domain, hostPort });
     console.log("Configuring nginx...");
@@ -96,7 +145,7 @@ export const deployCommand = new Command("deploy")
     await provider.exec("nginx -s reload");
     console.log(chalk.green("  Configured"));
 
-    // 7. Update state
+    // 8. Update state
     const now = new Date().toISOString();
     const record: DeploymentRecord = {
       name: appName,
@@ -106,6 +155,7 @@ export const deployCommand = new Command("deploy")
       domain,
       containerId: containerId.slice(0, 12),
       status: "running",
+      env,
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     };

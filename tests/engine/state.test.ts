@@ -45,6 +45,7 @@ describe("state", () => {
           domain: "myapp.ops.localhost",
           containerId: "abc123",
           status: "running" as const,
+          env: { DATABASE_URL: "sqlite:./dev.db" },
           createdAt: "2026-04-14T12:00:00Z",
           updatedAt: "2026-04-14T12:00:00Z",
         },
@@ -65,8 +66,8 @@ describe("getNextPort", () => {
   test("returns next port after highest used", async () => {
     const state = {
       deployments: {
-        app1: { name: "app1", image: "", port: 3000, hostPort: 3001, domain: "", containerId: "", status: "running" as const, createdAt: "", updatedAt: "" },
-        app2: { name: "app2", image: "", port: 3000, hostPort: 3003, domain: "", containerId: "", status: "running" as const, createdAt: "", updatedAt: "" },
+        app1: { name: "app1", image: "", port: 3000, hostPort: 3001, domain: "", containerId: "", status: "running" as const, env: {}, createdAt: "", updatedAt: "" },
+        app2: { name: "app2", image: "", port: 3000, hostPort: 3003, domain: "", containerId: "", status: "running" as const, env: {}, createdAt: "", updatedAt: "" },
       },
     };
     await writeState(testDir, state);
