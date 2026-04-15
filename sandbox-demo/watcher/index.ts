@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 /**
- * deploy-ops watcher
+ * dovu-app-paas watcher
  *
  * Watches a project directory for file changes and automatically triggers
- * `deploy-ops deploy` (or the local CLI) when changes are detected.
+ * `dovu-app-paas deploy` (or the local CLI) when changes are detected.
  *
  * Usage:
  *   bun run index.ts [path-to-project]
@@ -23,7 +23,7 @@ const dim    = (s: string) => `\x1b[2m${s}\x1b[0m`;
 // ─── Config ───────────────────────────────────────────────────────────────────
 const DEBOUNCE_MS = 500;
 
-const IGNORED_DIRS = new Set(["node_modules", ".deploy-ops", ".git"]);
+const IGNORED_DIRS = new Set(["node_modules", ".dovu-app-paas", ".git"]);
 
 function isIgnored(filePath: string, watchRoot: string): boolean {
   const rel = relative(watchRoot, filePath);
@@ -42,16 +42,16 @@ function isIgnored(filePath: string, watchRoot: string): boolean {
 
 // ─── Deploy ───────────────────────────────────────────────────────────────────
 async function runDeploy(projectDir: string): Promise<void> {
-  console.log(cyan("\n▶  Running deploy-ops deploy..."));
+  console.log(cyan("\n▶  Running dovu-app-paas deploy..."));
 
-  // Prefer the globally installed `deploy-ops` binary; fall back to the
+  // Prefer the globally installed `dovu-app-paas` binary; fall back to the
   // local CLI source so this works straight from the repo without installing.
   const cliPath = resolve(import.meta.dir, "../../src/cli/index.ts");
   const useLocalCli = await Bun.file(cliPath).exists();
 
   const cmd = useLocalCli
     ? ["bun", "run", cliPath, "deploy"]
-    : ["deploy-ops", "deploy"];
+    : ["dovu-app-paas", "deploy"];
 
   const proc = Bun.spawn(cmd, {
     cwd: projectDir,
@@ -72,10 +72,10 @@ async function runDeploy(projectDir: string): Promise<void> {
 function startWatcher(projectDir: string): void {
   const absDir = resolve(projectDir);
 
-  console.log(cyan("deploy-ops watcher"));
+  console.log(cyan("dovu-app-paas watcher"));
   console.log(dim(`  Watching: ${absDir}`));
   console.log(dim(`  Debounce: ${DEBOUNCE_MS}ms`));
-  console.log(dim(`  Ignoring: node_modules/, .deploy-ops/, .git/, *.tar`));
+  console.log(dim(`  Ignoring: node_modules/, .dovu-app-paas/, .git/, *.tar`));
   console.log(dim("  Press Ctrl+C to stop\n"));
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;

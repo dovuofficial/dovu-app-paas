@@ -87,7 +87,8 @@ export async function buildImage(
   projectDir: string,
   imageName: string,
   dockerfile: string | null,
-  dockerfileOptions: DockerfileOptions
+  dockerfileOptions: DockerfileOptions,
+  platform?: string
 ): Promise<string> {
   let generatedDockerfile = false;
   const dockerfilePath = join(projectDir, "Dockerfile");
@@ -98,7 +99,11 @@ export async function buildImage(
   }
 
   try {
-    await $`docker build -t ${imageName} ${projectDir}`.quiet();
+    if (platform) {
+      await $`docker build --platform ${platform} -t ${imageName} ${projectDir}`.quiet();
+    } else {
+      await $`docker build -t ${imageName} ${projectDir}`.quiet();
+    }
   } finally {
     if (generatedDockerfile) {
       await rm(dockerfilePath, { force: true });

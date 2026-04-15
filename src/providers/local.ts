@@ -1,7 +1,7 @@
 import { $ } from "bun";
 import type { Provider } from "./provider";
 
-const CONTAINER_NAME = "deploy-ops-mini-droplet";
+const CONTAINER_NAME = "dovu-app-paas-mini-droplet";
 
 export class LocalProvider implements Provider {
   readonly name = "local";

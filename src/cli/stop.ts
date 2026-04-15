@@ -11,7 +11,7 @@ export const stopCommand = new Command("stop")
     const config = await readConfig(cwd);
 
     if (!config) {
-      console.error(chalk.red("No config found. Run 'deploy-ops init' first."));
+      console.error(chalk.red("No config found. Run 'dovu-app init' first."));
       process.exit(1);
     }
 
@@ -24,7 +24,7 @@ export const stopCommand = new Command("stop")
     }
 
     const provider = resolveProvider(config);
-    const containerName = `deploy-ops-${app}`;
+    const containerName = `dovu-app-paas-${app}`;
 
     // Stop container
     await provider.exec(`docker stop ${containerName}`);
@@ -32,9 +32,9 @@ export const stopCommand = new Command("stop")
 
     // Disable nginx config (rename to .disabled)
     await provider.exec(
-      `mv ${provider.nginxConfDir}/deploy-ops-${app}.conf ${provider.nginxConfDir}/deploy-ops-${app}.conf.disabled 2>/dev/null || true`
+      `mv ${provider.nginxConfDir}/dovu-app-paas-${app}.conf ${provider.nginxConfDir}/dovu-app-paas-${app}.conf.disabled 2>/dev/null || true`
     );
-    await provider.exec("nginx -s reload");
+    await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
     console.log(chalk.green("✓") + " Nginx config disabled");
 
     // Update state

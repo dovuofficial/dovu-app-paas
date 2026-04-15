@@ -7,7 +7,7 @@ import { tmpdir } from "os";
 let testDir: string;
 
 beforeEach(async () => {
-  testDir = await mkdtemp(join(tmpdir(), "deploy-ops-rules-"));
+  testDir = await mkdtemp(join(tmpdir(), "dovu-app-paas-rules-"));
 });
 
 afterEach(async () => {

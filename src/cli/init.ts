@@ -17,7 +17,7 @@ function prompt(question: string): Promise<string> {
 }
 
 export const initCommand = new Command("init")
-  .description("Initialize deploy-ops configuration")
+  .description("Initialize dovu-app configuration")
   .action(async () => {
     const cwd = process.cwd();
 
@@ -41,14 +41,14 @@ export const initCommand = new Command("init")
       };
 
       await writeConfig(cwd, config);
-      console.log(chalk.green("✓") + " Config saved to .deploy-ops/config.json");
+      console.log(chalk.green("✓") + " Config saved to .dovu-app/config.json");
 
       console.log("Starting mini-droplet...");
       const provider = new LocalProvider(config.local!.baseDomain);
       await provider.setup();
       console.log(chalk.green("✓") + " Mini-droplet container started");
       console.log(chalk.green("✓") + " Nginx ready on localhost:80");
-      console.log(chalk.green("✓") + " Deploy with: " + chalk.bold("deploy-ops deploy"));
+      console.log(chalk.green("✓") + " Deploy with: " + chalk.bold("dovu-app deploy"));
     } else if (providerChoice === "digitalocean") {
       const host = await prompt("Droplet IP: ");
       const sshKey = await prompt("SSH key path (~/.ssh/id_ed25519): ") || "~/.ssh/id_ed25519";
@@ -61,7 +61,7 @@ export const initCommand = new Command("init")
       };
 
       await writeConfig(cwd, config);
-      console.log(chalk.green("✓") + " Config saved to .deploy-ops/config.json");
+      console.log(chalk.green("✓") + " Config saved to .dovu-app/config.json");
 
       // Verify connection
       console.log("Verifying connection...");
@@ -69,7 +69,7 @@ export const initCommand = new Command("init")
       const provider = new DigitalOceanProvider(config.digitalocean!);
       await provider.setup();
       console.log(chalk.green("✓") + " Connection verified");
-      console.log(chalk.green("✓") + " Deploy with: " + chalk.bold("deploy-ops deploy"));
+      console.log(chalk.green("✓") + " Deploy with: " + chalk.bold("dovu-app deploy"));
     } else {
       console.error(chalk.red("Unknown provider: " + providerChoice));
       process.exit(1);

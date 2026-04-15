@@ -44,7 +44,7 @@ export const deployCommand = new Command("deploy")
     const config = await readConfig(cwd);
 
     if (!config) {
-      console.error(chalk.red("No config found. Run 'deploy-ops init' first."));
+      console.error(chalk.red("No config found. Run 'dovu-app init' first."));
       process.exit(1);
     }
 
@@ -83,19 +83,20 @@ export const deployCommand = new Command("deploy")
       console.log(`  Env vars: ${Object.keys(env).join(", ")}`);
     }
 
-    // 3. Build Docker image
-    const imageTag = `deploy-ops-${appName}:${Date.now().toString(36)}`;
+    // 3. Build Docker image (cross-compile for remote providers)
+    const imageTag = `dovu-app-paas-${appName}:${Date.now().toString(36)}`;
+    const platform = provider.name === "local" ? undefined : "linux/amd64";
     console.log("\nBuilding image...");
     await buildImage(cwd, imageTag, deployConfig.dockerfile, {
       runtime: deployConfig.runtime,
       framework: deployConfig.framework,
       entrypoint: deployConfig.entrypoint,
       port: deployConfig.port,
-    });
+    }, platform);
     console.log(chalk.green("  Built: " + imageTag));
 
     // 4. Save and transfer image
-    const tarballPath = join(tmpdir(), `deploy-ops-${appName}.tar`);
+    const tarballPath = join(tmpdir(), `dovu-app-paas-${appName}.tar`);
     console.log("Shipping to target...");
     await saveImage(imageTag, tarballPath);
     await provider.transferImage(tarballPath);
@@ -105,7 +106,7 @@ export const deployCommand = new Command("deploy")
     // 5. Handle re-deploy: stop and remove old container by name
     const state = await readState(cwd);
     const existing = state.deployments[appName];
-    const containerName = `deploy-ops-${appName}`;
+    const containerName = `dovu-app-paas-${appName}`;
     try {
       await provider.exec(`docker stop ${containerName}`);
       await provider.exec(`docker rm ${containerName}`);
@@ -118,7 +119,7 @@ export const deployCommand = new Command("deploy")
     let hostPort = existing?.hostPort || await getNextPort(cwd);
     try {
       const portsOutput = await provider.exec(
-        `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*0\\.0\\.0\\.0:\\([0-9]*\\).*/\\1/p' | sort -u`
+        `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*:\\([0-9]*\\)->.*/\\1/p' | sort -u`
       );
       const used = new Set(portsOutput.trim().split("\n").filter(Boolean).map(Number));
       while (used.has(hostPort)) hostPort++;
@@ -130,19 +131,25 @@ export const deployCommand = new Command("deploy")
     console.log("Starting container...");
     const containerId = (
       await provider.exec(
-        `docker run -d --name ${containerName} -p ${hostPort}:${deployConfig.port} ${envFlags} ${imageTag}`
+        `docker run -d --name ${containerName} -p 127.0.0.1:${hostPort}:${deployConfig.port} --memory=256m --cpus=0.5 --restart=unless-stopped ${envFlags} ${imageTag}`
       )
     ).trim();
     console.log(chalk.green("  Started: " + containerId.slice(0, 12)));
 
     // 7. Configure nginx
     const domain = options.domain || `${appName}.${provider.baseDomain}`;
-    const nginxConf = generateNginxConfig({ serverName: domain, hostPort });
+    const nginxConf = generateNginxConfig({
+      serverName: domain,
+      hostPort,
+      ssl: provider.ssl ?? undefined,
+    });
     console.log("Configuring nginx...");
+    const confB64 = Buffer.from(nginxConf).toString("base64");
     await provider.exec(
-      `cat > ${provider.nginxConfDir}/deploy-ops-${appName}.conf << 'NGINX_EOF'\n${nginxConf}\nNGINX_EOF`
+      `echo '${confB64}' | base64 -d > ${provider.nginxConfDir}/dovu-app-paas-${appName}.conf`
     );
-    await provider.exec("nginx -s reload");
+    // nginx -s reload for local (alpine), systemctl for remote (ubuntu)
+    await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
     console.log(chalk.green("  Configured"));
 
     // 8. Update state

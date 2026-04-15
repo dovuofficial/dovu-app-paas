@@ -11,7 +11,7 @@ export const statusCommand = new Command("status")
     const config = await readConfig(cwd);
 
     if (!config) {
-      console.error(chalk.red("No config found. Run 'deploy-ops init' first."));
+      console.error(chalk.red("No config found. Run 'dovu-app init' first."));
       process.exit(1);
     }
 
@@ -24,7 +24,7 @@ export const statusCommand = new Command("status")
     }
 
     const provider = resolveProvider(config);
-    const containerName = `deploy-ops-${app}`;
+    const containerName = `dovu-app-${app}`;
 
     // Get container info
     let isRunning = false;

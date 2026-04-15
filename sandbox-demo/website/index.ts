@@ -60,4 +60,4 @@ const server = Bun.serve({
   },
 });
 
-console.log(`deploy-ops website running at http://localhost:${server.port}`);
+console.log(`dovu-app-paas website running at http://localhost:${server.port}`);

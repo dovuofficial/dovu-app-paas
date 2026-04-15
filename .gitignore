@@ -35,4 +35,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # deploy-ops runtime data
 .deploy-ops/
+.dovu-app-paas/
 .superpowers/
+.claude/

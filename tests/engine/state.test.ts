@@ -7,7 +7,7 @@ import { tmpdir } from "os";
 let testDir: string;
 
 beforeEach(async () => {
-  testDir = await mkdtemp(join(tmpdir(), "deploy-ops-test-"));
+  testDir = await mkdtemp(join(tmpdir(), "dovu-app-paas-test-"));
 });
 
 afterEach(async () => {
@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 describe("config", () => {
-  test("writeConfig creates .deploy-ops/config.json", async () => {
+  test("writeConfig creates .dovu-app-paas/config.json", async () => {
     const config = { provider: "local" as const, local: { baseDomain: "ops.localhost" } };
     await writeConfig(testDir, config);
     const result = await readConfig(testDir);
@@ -39,7 +39,7 @@ describe("state", () => {
       deployments: {
         myapp: {
           name: "myapp",
-          image: "deploy-ops-myapp:abc123",
+          image: "dovu-app-paas-myapp:abc123",
           port: 3000,
           hostPort: 3001,
           domain: "myapp.ops.localhost",

@@ -70,7 +70,7 @@ export const devCommand = new Command("dev")
     }
 
     // 3. Build image once (for deps layer)
-    const imageTag = `deploy-ops-dev-${appName}:latest`;
+    const imageTag = `dovu-app-paas-dev-${appName}:latest`;
     console.log("\nBuilding image (deps only, one-time)...");
     await buildImage(cwd, imageTag, deployConfig.dockerfile, {
       runtime: deployConfig.runtime,
@@ -96,7 +96,7 @@ export const devCommand = new Command("dev")
 
       // Stop the deployed container inside the mini-droplet
       try {
-        await provider.exec(`docker stop deploy-ops-${appName}`);
+        await provider.exec(`docker stop dovu-app-paas-${appName}`);
         console.log(chalk.yellow(`  Stopped deployed ${appName}`));
 
         if (existing) {
@@ -108,7 +108,7 @@ export const devCommand = new Command("dev")
     }
 
     // Stop any existing dev container on host
-    const containerName = `deploy-ops-dev-${appName}`;
+    const containerName = `dovu-app-paas-dev-${appName}`;
     try {
       await $`docker rm -f ${containerName}`.quiet();
     } catch {}
@@ -138,9 +138,9 @@ export const devCommand = new Command("dev")
       });
       try {
         await provider.exec(
-          `cat > ${provider.nginxConfDir}/deploy-ops-${appName}.conf << 'NGINX_EOF'\n${nginxConf}\nNGINX_EOF`
+          `echo '${Buffer.from(nginxConf).toString("base64")}' | base64 -d > ${provider.nginxConfDir}/dovu-app-paas-${appName}.conf`
         );
-        await provider.exec("nginx -s reload");
+        await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
       } catch {}
     }
 
@@ -189,18 +189,18 @@ export const devCommand = new Command("dev")
           });
           try {
             await provider.exec(
-              `cat > ${provider.nginxConfDir}/deploy-ops-${appName}.conf << 'NGINX_EOF'\n${nginxConf}\nNGINX_EOF`
+              `echo '${Buffer.from(nginxConf).toString("base64")}' | base64 -d > ${provider.nginxConfDir}/dovu-app-paas-${appName}.conf`
             );
             // Restart the deployed container
-            await provider.exec(`docker start deploy-ops-${appName}`);
+            await provider.exec(`docker start dovu-app-paas-${appName}`);
             existing.status = "running";
             existing.updatedAt = new Date().toISOString();
             await writeState(cwd, state);
-            await provider.exec("nginx -s reload");
+            await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
             console.log(chalk.green("✓") + ` Restored deployed ${appName} at http://${domain}`);
           } catch {
-            await provider.exec("nginx -s reload").catch(() => {});
-            console.log(chalk.yellow("  Could not restore deployed container. Run 'deploy-ops deploy' to redeploy."));
+            await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx").catch(() => {});
+            console.log(chalk.yellow("  Could not restore deployed container. Run 'dovu-app deploy' to redeploy."));
           }
         }
       }

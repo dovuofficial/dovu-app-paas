@@ -7,6 +7,7 @@ export class DigitalOceanProvider implements Provider {
   readonly name = "digitalocean";
   readonly baseDomain: string;
   readonly nginxConfDir = "/etc/nginx/conf.d";
+  readonly ssl: { certPath: string; keyPath: string } | null;
   private host: string;
   private user: string;
   private sshKeyPath: string;
@@ -16,6 +17,12 @@ export class DigitalOceanProvider implements Provider {
     this.user = config.user;
     this.sshKeyPath = config.sshKey;
     this.baseDomain = config.baseDomain;
+    // Wildcard cert for the base domain (created by certbot)
+    const certDomain = config.baseDomain;
+    this.ssl = {
+      certPath: `/etc/letsencrypt/live/${certDomain}/fullchain.pem`,
+      keyPath: `/etc/letsencrypt/live/${certDomain}/privkey.pem`,
+    };
   }
 
   async setup(): Promise<void> {
@@ -29,7 +36,12 @@ export class DigitalOceanProvider implements Provider {
 
   async transferImage(tarballPath: string): Promise<void> {
     const resolvedKey = this.sshKeyPath.replace("~", process.env.HOME || "");
-    await $`scp -i ${resolvedKey} -o StrictHostKeyChecking=no ${tarballPath} ${this.user}@${this.host}:/tmp/image.tar`.quiet();
+    const proc = Bun.spawn(
+      ["scp", "-i", resolvedKey, "-o", "StrictHostKeyChecking=no", tarballPath, `${this.user}@${this.host}:/tmp/image.tar`],
+      { stdout: "inherit", stderr: "inherit" }
+    );
+    const code = await proc.exited;
+    if (code !== 0) throw new Error(`SCP failed with exit code ${code}`);
     await this.exec("docker load -i /tmp/image.tar && rm /tmp/image.tar");
   }
 

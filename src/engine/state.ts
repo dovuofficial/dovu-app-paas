@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import type { AppConfig, StateFile } from "@/types";
 
-const CONFIG_DIR = ".deploy-ops";
+const CONFIG_DIR = ".dovu-app-paas";
 const CONFIG_FILE = "config.json";
 const STATE_FILE = "state.json";
 

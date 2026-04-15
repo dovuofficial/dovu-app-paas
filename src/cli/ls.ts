@@ -22,7 +22,7 @@ export const lsCommand = new Command("ls")
     const config = await readConfig(cwd);
 
     if (!config) {
-      console.error(chalk.red("No config found. Run 'deploy-ops init' first."));
+      console.error(chalk.red("No config found. Run 'dovu-app init' first."));
       process.exit(1);
     }
 
@@ -38,7 +38,7 @@ export const lsCommand = new Command("ls")
     const provider = resolveProvider(config);
     for (const dep of deployments) {
       try {
-        const running = await provider.exec(`docker inspect -f '{{.State.Running}}' deploy-ops-${dep.name}`);
+        const running = await provider.exec(`docker inspect -f '{{.State.Running}}' dovu-app-${dep.name}`);
         dep.status = running.trim() === "true" ? "running" : "stopped";
       } catch {
         dep.status = "stopped";

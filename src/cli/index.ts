@@ -8,11 +8,12 @@ import { statusCommand } from "./status";
 import { logsCommand } from "./logs";
 import { stopCommand } from "./stop";
 import { destroyCommand } from "./destroy";
+import { redeployCommand } from "./redeploy";
 
 const program = new Command();
 
 program
-  .name("deploy-ops")
+  .name("dovu-app")
   .description("Instant deployment of JS/TS projects to Docker containers")
   .version("0.1.0");
 
@@ -24,5 +25,6 @@ program.addCommand(statusCommand);
 program.addCommand(logsCommand);
 program.addCommand(stopCommand);
 program.addCommand(destroyCommand);
+program.addCommand(redeployCommand);
 
 program.parse();

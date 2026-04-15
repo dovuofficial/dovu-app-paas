@@ -84,6 +84,10 @@ Bun.serve({
       return json({ deleted: key });
     }
 
+    if (req.method === "GET" && path === "/health") {
+      return json({ status: "ok", uptime: process.uptime() });
+    }
+
     return json({ error: "Not found" }, 404);
   },
 });

@@ -1,5 +1,5 @@
 {
-  "name": "deploy-ops",
+  "name": "dovu-app-paas",
   "module": "index.ts",
   "type": "module",
   "private": true,
@@ -21,6 +21,6 @@
     "typecheck": "bun x tsc --noEmit"
   },
   "bin": {
-    "deploy-ops": "./src/cli/index.ts"
+    "dovu-app": "./src/cli/index.ts"
   }
 }

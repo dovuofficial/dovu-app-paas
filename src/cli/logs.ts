@@ -10,7 +10,7 @@ export const logsCommand = new Command("logs")
     const config = await readConfig(cwd);
 
     if (!config) {
-      console.error(chalk.red("No config found. Run 'deploy-ops init' first."));
+      console.error(chalk.red("No config found. Run 'dovu-app init' first."));
       process.exit(1);
     }
 
@@ -22,11 +22,11 @@ export const logsCommand = new Command("logs")
       process.exit(1);
     }
 
-    const containerName = `deploy-ops-${app}`;
+    const containerName = `dovu-app-${app}`;
 
     if (config.provider === "local") {
       // Stream logs directly — docker exec with docker logs -f
-      const proc = Bun.spawn(["docker", "exec", "deploy-ops-mini-droplet", "docker", "logs", "-f", containerName], {
+      const proc = Bun.spawn(["docker", "exec", "dovu-app-mini-droplet", "docker", "logs", "-f", containerName], {
         stdout: "inherit",
         stderr: "inherit",
       });

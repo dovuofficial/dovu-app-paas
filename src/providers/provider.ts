@@ -2,6 +2,7 @@ export interface Provider {
   readonly name: string;
   readonly baseDomain: string;
   readonly nginxConfDir: string;
+  readonly ssl?: { certPath: string; keyPath: string } | null;
 
   /** Transfer a Docker image tarball to the target */
   transferImage(tarballPath: string): Promise<void>;
