@@ -1,8 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEPLOY_OPS_DIR="$RUNNER_TEMP/deploy-ops"
+# DEPLOY_OPS_DIR is set by action.yml via github.action_path
+DEPLOY_OPS_DIR="${DEPLOY_OPS_DIR:?DEPLOY_OPS_DIR must be set}"
 WORKSPACE="$GITHUB_WORKSPACE"
+
+# --- 0. Validate required inputs ---
+errors=()
+[ -z "${INPUT_HOST:-}" ] && errors+=("'host' is required but not set")
+[ -z "${INPUT_SSH_KEY:-}" ] && errors+=("'ssh-key' is required but not set — add DEPLOY_SSH_KEY to your repo/org secrets")
+[ -z "${INPUT_BASE_DOMAIN:-}" ] && errors+=("'base-domain' is required but not set")
+[ -z "${INPUT_SSH_USER:-}" ] && INPUT_SSH_USER="deploy"
+[ -z "${GITHUB_REPOSITORY:-}" ] && errors+=("GITHUB_REPOSITORY is not set — are you running this outside GitHub Actions?")
+
+if [ ${#errors[@]} -gt 0 ]; then
+  echo "::error::deploy-ops: missing required configuration:"
+  for e in "${errors[@]}"; do
+    echo "  - $e"
+  done
+  exit 1
+fi
 
 # --- 1. Configure SSH ---
 SSH_KEY_FILE="$RUNNER_TEMP/deploy_ssh_key"
