@@ -22,7 +22,8 @@ export class HostProvider implements Provider {
   async teardown(): Promise<void> {}
 
   async transferImage(tarballPath: string): Promise<void> {
-    await this.exec(`docker load -i ${tarballPath} && rm ${tarballPath}`);
+    await $`docker load -i ${tarballPath}`.quiet();
+    await $`rm ${tarballPath}`.quiet();
   }
 
   async exec(command: string): Promise<string> {
