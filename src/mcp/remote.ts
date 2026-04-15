@@ -34,6 +34,7 @@ function checkAuth(req: Request): Response | null {
 
 Bun.serve({
   port: PORT,
+  idleTimeout: 255, // max — deploys can take minutes
   async fetch(req) {
     const url = new URL(req.url);
 
