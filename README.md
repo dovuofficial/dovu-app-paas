@@ -265,6 +265,7 @@ scripts/
 docs/
   digitalocean.md     DO provisioning + SSL guide
   security.md         Security posture + comparison with Forge, Coolify, etc.
+  next-steps.md       Roadmap: GitHub Action, dashboard, multi-server, DePIN
 ```
 
 ## Tests
