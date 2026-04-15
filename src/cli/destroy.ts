@@ -2,6 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { readConfig, readState, writeState } from "@/engine/state";
 import { resolveProvider } from "@/providers/resolve";
+import type { DeploymentRecord } from "@/types";
 
 const readline = await import("readline");
 
@@ -15,10 +16,18 @@ function prompt(question: string): Promise<string> {
   });
 }
 
+export function buildDestroyCommands(app: string, dep: DeploymentRecord | null) {
+  return {
+    containerName: `dovu-app-paas-${app}`,
+    image: dep?.image ?? null,
+  };
+}
+
 export const destroyCommand = new Command("destroy")
   .argument("<app>", "App name")
+  .option("--force", "Skip confirmation and work without state")
   .description("Remove a deployment completely")
-  .action(async (app: string) => {
+  .action(async (app: string, options: { force?: boolean }) => {
     const cwd = process.cwd();
     const config = await readConfig(cwd);
 
@@ -28,21 +37,23 @@ export const destroyCommand = new Command("destroy")
     }
 
     const state = await readState(cwd);
-    const dep = state.deployments[app];
+    const dep = state.deployments[app] ?? null;
 
-    if (!dep) {
+    if (!dep && !options.force) {
       console.error(chalk.red(`Deployment '${app}' not found.`));
       process.exit(1);
     }
 
-    const confirm = await prompt(`Remove ${app} and all its data? (y/N) `);
-    if (confirm.toLowerCase() !== "y") {
-      console.log("Cancelled.");
-      return;
+    if (!options.force) {
+      const confirm = await prompt(`Remove ${app} and all its data? (y/N) `);
+      if (confirm.toLowerCase() !== "y") {
+        console.log("Cancelled.");
+        return;
+      }
     }
 
     const provider = resolveProvider(config);
-    const containerName = `dovu-app-paas-${app}`;
+    const { containerName, image } = buildDestroyCommands(app, dep);
 
     // Remove container
     try {
@@ -54,10 +65,12 @@ export const destroyCommand = new Command("destroy")
     console.log(chalk.green("✓") + " Container removed");
 
     // Remove image
-    try {
-      await provider.exec(`docker rmi ${dep.image}`);
-    } catch {}
-    console.log(chalk.green("✓") + " Image removed");
+    if (image) {
+      try {
+        await provider.exec(`docker rmi ${image}`);
+      } catch {}
+      console.log(chalk.green("✓") + " Image removed");
+    }
 
     // Remove nginx config
     await provider.exec(`rm -f ${provider.nginxConfDir}/dovu-app-paas-${app}.conf ${provider.nginxConfDir}/dovu-app-paas-${app}.conf.disabled`);
@@ -65,7 +78,9 @@ export const destroyCommand = new Command("destroy")
     console.log(chalk.green("✓") + " Nginx config removed");
 
     // Remove from state
-    delete state.deployments[app];
-    await writeState(cwd, state);
-    console.log(chalk.green("✓") + " Removed from state");
+    if (dep) {
+      delete state.deployments[app];
+      await writeState(cwd, state);
+      console.log(chalk.green("✓") + " Removed from state");
+    }
   });
