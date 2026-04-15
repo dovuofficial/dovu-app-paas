@@ -1,4 +1,4 @@
-# deploy-ops
+# dovu-app-paas
 
 One-command deployment of JS/TS/PHP projects to Docker containers. Zero config, automatic framework detection, wildcard domains, hot-reload dev mode.
 
@@ -18,7 +18,7 @@ bun run dev init    # select "local"
 
 # Deploy any project
 cd your-project
-bun run dev deploy
+dovu-app deploy
 
 # That's it. Live at http://your-project.ops.localhost
 ```
@@ -30,7 +30,7 @@ bun run dev deploy
 bun run dev init    # select "digitalocean", enter IP, SSH key, base domain
 
 cd your-project
-bun run dev deploy
+dovu-app deploy
 
 # Live at https://your-project.apps.yourdomain.com (with SSL)
 ```
@@ -47,14 +47,14 @@ bun run dev deploy
 
 ```bash
 git clone <repo>
-cd deploy-ops
+cd dovu-app-paas
 bun install
 ```
 
 ### Initialize
 
 ```bash
-bun run dev init
+dovu-app init
 ```
 
 **Local:** Select `local`. Creates a Docker-in-Docker container with nginx on port 80. Wildcard `*.ops.localhost` domains resolve natively.
@@ -65,29 +65,30 @@ bun run dev init
 
 | Command | Description |
 |---------|-------------|
-| `deploy-ops init` | Initialize provider (local or digitalocean) |
-| `deploy-ops deploy` | Deploy current directory |
-| `deploy-ops dev` | Hot-reload dev mode with volume mount |
-| `deploy-ops ls` | List all deployments with status |
-| `deploy-ops status <app>` | CPU, memory, uptime, warnings |
-| `deploy-ops logs <app>` | Stream container logs |
-| `deploy-ops stop <app>` | Stop a deployment (nginx disabled) |
-| `deploy-ops destroy <app>` | Remove deployment completely |
+| `dovu-app init` | Initialize provider (local or digitalocean) |
+| `dovu-app deploy` | Deploy current directory |
+| `dovu-app dev` | Hot-reload dev mode with volume mount |
+| `dovu-app ls` | List all deployments with status |
+| `dovu-app status <app>` | CPU, memory, uptime, warnings |
+| `dovu-app logs <app>` | Stream container logs |
+| `dovu-app stop <app>` | Stop a deployment (nginx disabled) |
+| `dovu-app destroy <app>` | Remove deployment completely |
+| `dovu-app redeploy-all` | Redeploy all apps from state (after droplet reboot) |
 
 Run commands with:
 
 ```bash
-bun run dev <command>
+dovu-app <command>
 
-# or directly:
-bun run src/cli/index.ts <command>
+# or via bun:
+bun run dev <command>
 ```
 
 ### Deploy
 
 ```bash
 cd my-project
-bun run dev deploy
+dovu-app deploy
 ```
 
 Options:
@@ -106,7 +107,7 @@ When deploying to DigitalOcean, images are automatically cross-compiled for `lin
 
 ```bash
 cd my-project
-bun run dev dev
+dovu-app dev
 ```
 
 Runs your project in a container with the source code volume-mounted for hot reload. On exit (Ctrl+C), the deployed container is restored. Dev mode is local-only.
@@ -117,9 +118,20 @@ Options:
 --name <name>       Override app name
 ```
 
+### Redeploy all
+
+```bash
+dovu-app redeploy-all
+```
+
+Reads the state file and redeploys all apps. For each app:
+- If already running — skips
+- If container exists but stopped — restarts it
+- If container is gone (droplet reset) — full rebuild from source
+
 ## Framework detection
 
-deploy-ops inspects your project and auto-detects:
+Inspects your project and auto-detects:
 
 | Framework | Detection | Runtime | Port |
 |-----------|-----------|---------|------|
@@ -139,11 +151,11 @@ Port detection scans source files for `.listen(N)`, `port: N`, and `Bun.serve({ 
 ┌──────────────────────────────────────────────────┐
 │                   Your machine                    │
 │                                                   │
-│  deploy-ops CLI ──► Docker build ──► tarball       │
+│  dovu-app CLI ──► Docker build ──► tarball         │
 │       │                                 │         │
 │       ▼                                 ▼         │
 │  ┌─────────────────────────────────────────────┐  │
-│  │        deploy-ops-mini-droplet (DinD)       │  │
+│  │     dovu-app-paas-mini-droplet (DinD)       │  │
 │  │                                             │  │
 │  │  nginx (port 80)                            │  │
 │  │    *.ops.localhost ──► container:port        │  │
@@ -162,7 +174,7 @@ Port detection scans source files for `.listen(N)`, `port: N`, and `Bun.serve({ 
 ┌───────────────────┐         ┌──────────────────────────────┐
 │   Your machine     │  SSH    │     DigitalOcean Droplet      │
 │                    │ ──────► │                                │
-│  deploy-ops CLI    │  SCP    │  Docker containers             │
+│  dovu-app CLI      │  SCP    │  Docker containers             │
 │  docker build      │ ──────► │  nginx + Let's Encrypt SSL    │
 │  (linux/amd64)     │         │  *.apps.yourdomain.com        │
 └───────────────────┘         └──────────────────────────────┘
@@ -173,9 +185,9 @@ Port detection scans source files for `.listen(N)`, `port: N`, and `Bun.serve({ 
 1. **Inspect** — detect runtime, framework, entrypoint, port
 2. **Build** — generate Dockerfile if needed, `docker build` (cross-compile for remote)
 3. **Ship** — `docker save` to tarball, SCP to target, `docker load`
-4. **Run** — `docker run` with port mapping, env vars
+4. **Run** — `docker run` bound to `127.0.0.1`, with memory/CPU limits, auto-restart
 5. **Route** — write nginx config (with SSL for DO), reload nginx
-6. **State** — save to `.deploy-ops/state.json`
+6. **State** — save to `.dovu-app-paas/state.json`
 
 Re-deploys automatically stop and replace the old container.
 
@@ -198,7 +210,7 @@ Deploy all locally:
 
 ```bash
 for dir in simple api website ui nextjs laravel luminus-app; do
-  (cd sandbox-demo/$dir && bun run ../../src/cli/index.ts deploy --name $dir)
+  (cd sandbox-demo/$dir && dovu-app deploy --name $dir)
 done
 ```
 
@@ -208,6 +220,16 @@ Local URLs:
 - http://website.ops.localhost
 - http://nextjs.ops.localhost
 - http://laravel.ops.localhost
+
+## Droplet provisioning
+
+Provision a fresh DigitalOcean droplet with one script:
+
+```bash
+ssh root@<droplet-ip> 'bash -s' < scripts/provision-droplet.sh
+```
+
+Installs Docker, nginx, certbot, fail2ban, creates `deploy` user, gets wildcard SSL cert, configures firewall and rate limiting. See [docs/digitalocean.md](docs/digitalocean.md) for full details.
 
 ## Project structure
 
@@ -223,6 +245,7 @@ src/
     logs.ts           Stream container logs
     stop.ts           Stop deployment
     destroy.ts        Full removal
+    redeploy.ts       Redeploy all from state
   engine/
     rules.ts          Framework + runtime detection
     docker.ts         Dockerfile generation + cross-compilation
@@ -237,6 +260,8 @@ src/
 tests/
   engine/             Rules, Docker, nginx, state tests
   providers/          Provider interface tests
+scripts/
+  provision-droplet.sh  One-command droplet provisioning
 docs/
   digitalocean.md     DO provisioning + SSL guide
   security.md         Security posture + comparison with Forge, Coolify, etc.
@@ -252,7 +277,7 @@ bun test
 
 ## Local provider details
 
-The local provider creates a single container named `deploy-ops-mini-droplet`:
+The local provider creates a single container named `dovu-app-paas-mini-droplet`:
 
 - **Image:** `docker:dind` (Docker-in-Docker)
 - **Port mapping:** `80:80` (nginx)
@@ -263,9 +288,9 @@ The local provider creates a single container named `deploy-ops-mini-droplet`:
 To reset everything:
 
 ```bash
-docker rm -f deploy-ops-mini-droplet
-rm .deploy-ops/state.json
-bun run dev init   # recreates the mini-droplet
+docker rm -f dovu-app-paas-mini-droplet
+rm .dovu-app-paas/state.json
+dovu-app init   # recreates the mini-droplet
 ```
 
 ## Tech stack
