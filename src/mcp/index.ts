@@ -3,7 +3,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { resolveConfig } from "./config";
 import { resolveProvider } from "@/providers/resolve";
-import { readState, writeState } from "@/engine/state";
+import { readState, writeState, getNextPort } from "@/engine/state";
+import { inspectProject } from "@/engine/rules";
+import { buildImage, saveImage } from "@/engine/docker";
+import { generateNginxConfig } from "@/engine/nginx";
+import { readFile, rm } from "fs/promises";
+import { join } from "path";
+import { tmpdir } from "os";
+import type { DeploymentRecord } from "@/types";
 import { formatDeploymentList, formatStatus } from "./tools";
 import type { ContainerStats } from "./tools";
 
@@ -188,6 +195,136 @@ server.tool(
     }
 
     return { content: [{ type: "text", text: `Destroyed '${app}':\n${results.map(r => `  - ${r}`).join("\n")}` }] };
+  }
+);
+
+server.tool(
+  "deploy",
+  "Deploy the current project to the configured droplet",
+  {
+    name: z.string().optional().describe("Override app name (defaults to directory name)"),
+    domain: z.string().optional().describe("Override domain"),
+    env: z.record(z.string()).optional().describe("Environment variables as key-value pairs"),
+  },
+  async ({ name, domain, env: envInput }) => {
+    const cwd = process.cwd();
+    const { config, error } = getConfigOrError(cwd);
+    if (error) return { content: [{ type: "text", text: error }] };
+
+    const provider = resolveProvider(config!);
+    const steps: string[] = [];
+
+    // 1. Inspect project
+    const deployConfig = await inspectProject(cwd);
+    const appName = name || deployConfig.name;
+    steps.push(`Detected: ${deployConfig.runtime}/${deployConfig.framework}, entrypoint=${deployConfig.entrypoint}, port=${deployConfig.port}`);
+
+    // 2. Collect env vars
+    const envVars: Record<string, string> = {};
+    try {
+      const envContent = await readFile(join(cwd, ".env"), "utf-8");
+      for (const line of envContent.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+        const eqIndex = trimmed.indexOf("=");
+        if (eqIndex === -1) continue;
+        const key = trimmed.slice(0, eqIndex).trim();
+        let value = trimmed.slice(eqIndex + 1).trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        envVars[key] = value;
+      }
+    } catch {}
+
+    // Override with provided env vars
+    if (envInput) Object.assign(envVars, envInput);
+
+    // 3. Build image
+    const imageTag = `dovu-app-paas-${appName}:${Date.now().toString(36)}`;
+    const platform = provider.name === "local" ? undefined : "linux/amd64";
+    await buildImage(cwd, imageTag, deployConfig.dockerfile, {
+      runtime: deployConfig.runtime,
+      framework: deployConfig.framework,
+      entrypoint: deployConfig.entrypoint,
+      port: deployConfig.port,
+    }, platform);
+    steps.push(`Built image: ${imageTag}`);
+
+    // 4. Ship image
+    const tarballPath = join(tmpdir(), `dovu-app-paas-${appName}.tar`);
+    await saveImage(imageTag, tarballPath);
+    await provider.transferImage(tarballPath);
+    await rm(tarballPath, { force: true });
+    steps.push("Image transferred to target");
+
+    // 5. Stop old container
+    const state = await readState(cwd);
+    const existing = state.deployments[appName];
+    const containerName = `dovu-app-paas-${appName}`;
+    try {
+      await provider.exec(`docker stop ${containerName}`);
+      await provider.exec(`docker rm ${containerName}`);
+    } catch {}
+
+    // 6. Find free port and start container
+    let hostPort = existing?.hostPort || await getNextPort(cwd);
+    try {
+      const portsOutput = await provider.exec(
+        `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*:\\([0-9]*\\)->.*/\\1/p' | sort -u`
+      );
+      const used = new Set(portsOutput.trim().split("\n").filter(Boolean).map(Number));
+      while (used.has(hostPort)) hostPort++;
+    } catch {}
+
+    const envFlags = Object.entries(envVars).map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`).join(" ");
+    const containerId = (
+      await provider.exec(
+        `docker run -d --name ${containerName} -p 127.0.0.1:${hostPort}:${deployConfig.port} --memory=256m --cpus=0.5 --restart=unless-stopped ${envFlags} ${imageTag}`
+      )
+    ).trim();
+    steps.push(`Container started: ${containerId.slice(0, 12)}`);
+
+    // 7. Configure nginx
+    const deployDomain = domain || `${appName}.${provider.baseDomain}`;
+    const nginxConf = generateNginxConfig({
+      serverName: deployDomain,
+      hostPort,
+      ssl: provider.ssl ?? undefined,
+    });
+    const confB64 = Buffer.from(nginxConf).toString("base64");
+    await provider.exec(
+      `echo '${confB64}' | base64 -d > ${provider.nginxConfDir}/dovu-app-paas-${appName}.conf`
+    );
+    await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
+    steps.push("Nginx configured");
+
+    // 8. Update state
+    const now = new Date().toISOString();
+    const record: DeploymentRecord = {
+      name: appName,
+      image: imageTag,
+      port: deployConfig.port,
+      hostPort,
+      domain: deployDomain,
+      containerId: containerId.slice(0, 12),
+      status: "running",
+      env: envVars,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+    state.deployments[appName] = record;
+    await writeState(cwd, state);
+
+    const url = `https://${deployDomain}`;
+    steps.push(`Deployed: ${url}`);
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ url, appName, containerId: containerId.slice(0, 12), steps }, null, 2),
+      }],
+    };
   }
 );
 
