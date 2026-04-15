@@ -1,145 +1,142 @@
-# dovu-app-paas
+# DOVU App PaaS
 
-One-command deployment of JS/TS/PHP projects to Docker containers. Zero config, automatic framework detection, wildcard domains, hot-reload dev mode.
+An MCP native internal app deploy layer for turning AI built projects into live URLs instantly.
 
-**Both providers working:**
-- **Local** — Docker-in-Docker on your machine, `*.ops.localhost` domains
-- **DigitalOcean** — Remote droplet via SSH, wildcard SSL via Let's Encrypt. See [docs/digitalocean.md](docs/digitalocean.md)
-- Security comparison with Forge, Coolify, raw droplets: [docs/security.md](docs/security.md)
+---
 
-## Quick start (local)
+DOVU App PaaS is an MCP native deploy layer for trusted teams.
+It lets Claude Code or a developer turn a project into a live app with a stable name and shareable URL in one step.
+Built for internal tools, previews, and AI generated software.
+Runs locally or on a remote box.
+Controlled through a simple deploy interface, with logs, status, redeploy, and destroy available through MCP and CLI.
 
-```bash
-# Prerequisites: Bun, Docker Desktop running
-bun install
+## What it is
 
-# Initialize (creates a Docker-in-Docker "mini-droplet" with nginx)
-bun run dev init    # select "local"
+An MCP native deploy substrate for trusted teams.
 
-# Deploy any project
-cd your-project
-dovu-app deploy
+It lets Claude Code or a developer deploy apps with a stable name and an instant URL. You give the app a name, call deploy, and get back a live link. No manual Docker, nginx, or SSL configuration.
 
-# That's it. Live at http://your-project.ops.localhost
-```
+It is built for internal speed, not general purpose multi-tenant hosting. The assumption is that everyone deploying is trusted, and the priority is collapsing time between "I have an idea" and "here's the URL."
 
-## Quick start (DigitalOcean)
+## The main workflow
 
-```bash
-# Prerequisites: Bun, a provisioned droplet (see docs/digitalocean.md)
-bun run dev init    # select "digitalocean", enter IP, SSH key, base domain
+This is what actually happens:
 
-cd your-project
-dovu-app deploy
+1. **Tell Claude Code what to build.** Describe the app, API, tool, or prototype you want.
+2. **Choose the app name.** Give it a stable, memorable name like `dashboard` or `invoice-tool`.
+3. **Claude calls the MCP server.** The deploy tool handles everything: framework detection, Docker build, image transfer, container start, nginx routing, SSL.
+4. **The app is built and deployed.** Runtime and framework are auto-detected. Dockerfile is generated if needed. The image is built and shipped to the target.
+5. **A URL is returned immediately.** `https://dashboard.apps.yourdomain.com` or `http://dashboard.ops.localhost` depending on provider.
+6. **Logs, status, redeploy, and destroy are available.** All through the same MCP interface or CLI.
 
-# Live at https://your-project.apps.yourdomain.com (with SSL)
-```
+The same workflow works from the CLI without Claude Code. `dovu-app deploy --name dashboard` does the same thing.
 
-## Setup
+## Why it exists
 
-### Requirements
+To collapse time from idea to live software.
 
-- [Bun](https://bun.sh) v1.3+
-- [Docker Desktop](https://docker.com/products/docker-desktop) running
-- macOS or Linux (Windows untested)
+When a trusted team member can say "build me X" and get a live URL back in under a minute, the bottleneck shifts from deployment to imagination. Manual deployment work disappears for small internal tools, previews, prototypes, and AI generated apps.
 
-### Install
+## Current scope
 
-```bash
-git clone <repo>
-cd dovu-app-paas
-bun install
-```
+Be clear about what this is and isn't right now:
 
-### Initialize
+- **Trusted internal team use.** Not designed for untrusted multi-tenant workloads.
+- **Bearer token auth.** Good enough for internal workflows. Not hardened zero-trust.
+- **Two providers.** Local (Docker-in-Docker, `*.ops.localhost`) and DigitalOcean (remote droplet via SSH, wildcard SSL via Let's Encrypt).
+- **Branch-aware naming and cleanup.** Feature branches get prefixed names. Merged branches auto-destroy.
+- **MCP control surface.** Deploy, dev, list, status, logs, and destroy are all MCP tools.
+- **Not a full secure multi-tenant platform yet.** That's a future direction, not the current product.
 
-```bash
-dovu-app init
-```
+## Product surfaces
 
-**Local:** Select `local`. Creates a Docker-in-Docker container with nginx on port 80. Wildcard `*.ops.localhost` domains resolve natively.
+### Core: deploy engine + MCP server
 
-**DigitalOcean:** Select `digitalocean`. Enter your droplet IP, SSH key path, SSH user (`deploy` recommended — not root), and base domain. See [docs/digitalocean.md](docs/digitalocean.md) for full provisioning guide.
+The core repo is the product. It contains:
+
+- **MCP server** (`src/mcp/`) — exposes `deploy`, `dev`, `ls`, `status`, `logs`, and `destroy` as MCP tools. This is how Claude Code interacts with the deploy layer.
+- **CLI** (`src/cli/`) — the same commands available from the terminal: `dovu-app deploy`, `dovu-app ls`, `dovu-app status`, `dovu-app logs`, `dovu-app destroy`, etc.
+- **Deploy engine** (`src/engine/`) — framework detection, Dockerfile generation, nginx config, state management.
+- **Providers** (`src/providers/`) — local Docker-in-Docker and DigitalOcean SSH/SCP.
+
+### GitHub Action: CI and branch preview wrapper
+
+The [GitHub Action](action.yml) is a thin wrapper around the core CLI for CI workflows:
+
+- Deploys on push, destroys on branch delete
+- Branch-aware naming (feature branches get prefixed URLs)
+- Outputs the live URL for PR comments or downstream steps
+
+The action is a distribution channel, not the product identity.
+
+## Use cases
+
+**Instant internal tools.** Tell Claude Code to build an admin dashboard, invoice generator, or data viewer. It deploys and you share the URL with your team.
+
+**PR and branch preview deploys.** Every feature branch gets its own URL. Reviewers click a link instead of checking out code. Branch merges clean up automatically.
+
+**AI generated prototypes shared by URL.** Build something speculative, deploy it, share the link, get feedback. If it's useful, keep it. If not, destroy it.
+
+## Security
+
+Bearer token authentication only, for now. This is good enough for trusted team workflows where everyone deploying is known and internal.
+
+This is not positioned as hardened zero-trust infrastructure. If you need multi-tenant isolation, per-user auth, or network segmentation, that's future work. The current security posture is documented in [docs/security.md](docs/security.md).
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `dovu-app init` | Initialize provider (local or digitalocean) |
+| `dovu-app init` | Initialize provider (local or DigitalOcean) |
 | `dovu-app deploy` | Deploy current directory |
-| `dovu-app dev` | Hot-reload dev mode with volume mount |
+| `dovu-app dev` | Hot-reload dev mode (local only) |
 | `dovu-app ls` | List all deployments with status |
 | `dovu-app status <app>` | CPU, memory, uptime, warnings |
 | `dovu-app logs <app>` | Stream container logs |
-| `dovu-app stop <app>` | Stop a deployment (nginx disabled) |
+| `dovu-app stop <app>` | Stop a deployment |
 | `dovu-app destroy <app>` | Remove deployment completely |
-| `dovu-app redeploy-all` | Redeploy all apps from state (after droplet reboot) |
+| `dovu-app redeploy-all` | Redeploy all apps from state |
 
-Run commands with:
-
-```bash
-dovu-app <command>
-
-# or via bun:
-bun run dev <command>
-```
-
-### Deploy
-
-```bash
-cd my-project
-dovu-app deploy
-```
-
-Options:
+Deploy options:
 
 ```
 --name <name>       Override app name (default: directory name)
---domain <domain>   Use a custom domain instead of <name>.<baseDomain>
+--domain <domain>   Custom domain instead of <name>.<baseDomain>
 -e KEY=VALUE        Set environment variables (repeatable)
 ```
 
-Environment variables are also read from `.env` files in the project directory. CLI flags override `.env` values.
+## Quick start
 
-When deploying to DigitalOcean, images are automatically cross-compiled for `linux/amd64` and transferred via SCP. SSL is configured automatically using the wildcard certificate.
-
-### Dev mode
+### Local
 
 ```bash
-cd my-project
-dovu-app dev
+bun install
+dovu-app init          # select "local"
+cd your-project
+dovu-app deploy
+# Live at http://your-project.ops.localhost
 ```
 
-Runs your project in a container with the source code volume-mounted for hot reload. On exit (Ctrl+C), the deployed container is restored. Dev mode is local-only.
-
-Options:
-
-```
---name <name>       Override app name
-```
-
-### Redeploy all
+### DigitalOcean
 
 ```bash
-dovu-app redeploy-all
+dovu-app init          # select "digitalocean", enter IP, SSH key, base domain
+cd your-project
+dovu-app deploy
+# Live at https://your-project.apps.yourdomain.com (with SSL)
 ```
 
-Reads the state file and redeploys all apps. For each app:
-- If already running — skips
-- If container exists but stopped — restarts it
-- If container is gone (droplet reset) — full rebuild from source
+Droplet provisioning is a single script. See [docs/digitalocean.md](docs/digitalocean.md).
 
 ## Framework detection
 
-Inspects your project and auto-detects:
-
-| Framework | Detection | Runtime | Port |
-|-----------|-----------|---------|------|
-| **Bun** | `bun.lockb` or default | `oven/bun:1-alpine` | Scanned from source, fallback 3000 |
-| **Node.js** | `package.json` engines | `node:20-alpine` | Scanned from source, fallback 3000 |
-| **Next.js** | `next.config.*` or `next` in deps | `node:20-alpine` (3-stage build) | 3000 |
-| **Laravel** | `artisan` file or `laravel/framework` in composer.json | `php:8.4-cli` | 8000 |
-| **Custom** | `Dockerfile` present | Your Dockerfile | Your config |
+| Framework | Detection | Runtime |
+|-----------|-----------|---------|
+| **Bun** | `bun.lockb` or default | `oven/bun:1-alpine` |
+| **Node.js** | `package.json` engines | `node:20-alpine` |
+| **Next.js** | `next.config.*` or `next` in deps | `node:20-alpine` (3-stage build) |
+| **Laravel** | `artisan` or `laravel/framework` | `php:8.4-cli` |
+| **Custom** | `Dockerfile` present | Your Dockerfile |
 
 Port detection scans source files for `.listen(N)`, `port: N`, and `Bun.serve({ port: N })` patterns.
 
@@ -161,7 +158,7 @@ Port detection scans source files for `.listen(N)`, `port: N`, and `Bun.serve({ 
 │  │    *.ops.localhost ──► container:port        │  │
 │  │                                             │  │
 │  │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐       │  │
-│  │  │simple│ │ api  │ │nextjs│ │laravel│  ...  │  │
+│  │  │ app1 │ │ app2 │ │ app3 │ │ app4 │  ...  │  │
 │  │  │:3001 │ │:3002 │ │:3003 │ │:3004 │       │  │
 │  │  └──────┘ └──────┘ └──────┘ └──────┘       │  │
 │  └─────────────────────────────────────────────┘  │
@@ -180,125 +177,17 @@ Port detection scans source files for `.listen(N)`, `port: N`, and `Bun.serve({ 
 └───────────────────┘         └──────────────────────────────┘
 ```
 
-## How deployment works
-
-1. **Inspect** — detect runtime, framework, entrypoint, port
-2. **Build** — generate Dockerfile if needed, `docker build` (cross-compile for remote)
-3. **Ship** — `docker save` to tarball, SCP to target, `docker load`
-4. **Run** — `docker run` bound to `127.0.0.1`, with memory/CPU limits, auto-restart
-5. **Route** — write nginx config (with SSL for DO), reload nginx
-6. **State** — save to `.dovu-app-paas/state.json`
-
-Re-deploys automatically stop and replace the old container.
-
-## Sandbox demos
-
-The `sandbox-demo/` directory contains test projects for each supported framework:
-
-| Demo | Type | Description |
-|------|------|-------------|
-| `simple/` | Bun | Minimal `Bun.serve()` — returns "hello!" |
-| `api/` | Bun | REST API with SQLite CRUD (`/keys` endpoint) |
-| `website/` | Bun | Static file server with landing page |
-| `ui/` | Bun | Frontend app |
-| `watcher/` | Bun | Long-running background process |
-| `nextjs/` | Next.js | Default Next.js 16 app |
-| `laravel/` | Laravel | Laravel 13 with SQLite |
-| `luminus-app/` | Clojure | Luminus framework with Undertow + SQLite |
-
-Deploy all locally:
-
-```bash
-for dir in simple api website ui nextjs laravel luminus-app; do
-  (cd sandbox-demo/$dir && dovu-app deploy --name $dir)
-done
-```
-
-Local URLs:
-- http://simple.ops.localhost
-- http://api.ops.localhost
-- http://website.ops.localhost
-- http://nextjs.ops.localhost
-- http://laravel.ops.localhost
-
-## Droplet provisioning
-
-Provision a fresh DigitalOcean droplet with one script:
-
-```bash
-ssh root@<droplet-ip> 'bash -s' < scripts/provision-droplet.sh
-```
-
-Installs Docker, nginx, certbot, fail2ban, creates `deploy` user, gets wildcard SSL cert, configures firewall and rate limiting. See [docs/digitalocean.md](docs/digitalocean.md) for full details.
-
-## Project structure
-
-```
-src/
-  cli/
-    index.ts          CLI entry point (commander)
-    init.ts           Provider setup
-    deploy.ts         Build + ship + run pipeline
-    dev.ts            Hot-reload dev mode
-    ls.ts             List deployments
-    status.ts         Container stats + warnings
-    logs.ts           Stream container logs
-    stop.ts           Stop deployment
-    destroy.ts        Full removal
-    redeploy.ts       Redeploy all from state
-  engine/
-    rules.ts          Framework + runtime detection
-    docker.ts         Dockerfile generation + cross-compilation
-    nginx.ts          Reverse proxy config (HTTP + HTTPS)
-    state.ts          JSON state management
-  providers/
-    provider.ts       Provider interface
-    local.ts          Docker-in-Docker local provider
-    digitalocean.ts   SSH/SCP remote provider
-    resolve.ts        Provider factory
-  types.ts            TypeScript interfaces
-tests/
-  engine/             Rules, Docker, nginx, state tests
-  providers/          Provider interface tests
-scripts/
-  provision-droplet.sh  One-command droplet provisioning
-docs/
-  digitalocean.md     DO provisioning + SSL guide
-  security.md         Security posture + comparison with Forge, Coolify, etc.
-  next-steps.md       Roadmap: GitHub Action, dashboard, multi-server, DePIN
-```
-
 ## Tests
 
 ```bash
 bun test
 ```
 
-23 tests across 5 files covering framework detection, Dockerfile generation, nginx config, state management, and provider interface compliance.
-
-## Local provider details
-
-The local provider creates a single container named `dovu-app-paas-mini-droplet`:
-
-- **Image:** `docker:dind` (Docker-in-Docker)
-- **Port mapping:** `80:80` (nginx)
-- **Nginx:** Installed via `apk add nginx`, configs in `/etc/nginx/http.d/`
-- **Domains:** `*.ops.localhost` resolves to `127.0.0.1` natively
-- **Storage:** All images and containers live inside the mini-droplet
-
-To reset everything:
-
-```bash
-docker rm -f dovu-app-paas-mini-droplet
-rm .dovu-app-paas/state.json
-dovu-app init   # recreates the mini-droplet
-```
-
 ## Tech stack
 
 - **Runtime:** [Bun](https://bun.sh)
 - **CLI:** [Commander.js](https://github.com/tj/commander.js)
-- **Containers:** Docker (Docker-in-Docker for local, native Docker for DO)
+- **Containers:** Docker
 - **Proxy:** nginx with Let's Encrypt SSL
-- **SSH:** ssh2 + SCP (for DigitalOcean provider)
-- **Language:** TypeScript (strict mode, path aliases)
+- **MCP:** Model Context Protocol server for AI tool integration
+- **Language:** TypeScript
