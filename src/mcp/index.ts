@@ -328,5 +328,113 @@ server.tool(
   }
 );
 
+server.tool(
+  "dev",
+  "Start hot-reload dev mode for the current project",
+  {
+    name: z.string().optional().describe("Override app name"),
+    port: z.number().optional().describe("Override host port"),
+    env: z.record(z.string()).optional().describe("Environment variables as key-value pairs"),
+  },
+  async ({ name, port, env: envInput }) => {
+    const cwd = process.cwd();
+
+    // Inspect project
+    const deployConfig = await inspectProject(cwd);
+    const appName = name || deployConfig.name;
+
+    // Collect env vars
+    const envVars: Record<string, string> = {};
+    try {
+      const envContent = await readFile(join(cwd, ".env"), "utf-8");
+      for (const line of envContent.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+        const eqIndex = trimmed.indexOf("=");
+        if (eqIndex === -1) continue;
+        const key = trimmed.slice(0, eqIndex).trim();
+        let value = trimmed.slice(eqIndex + 1).trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        envVars[key] = value;
+      }
+    } catch {}
+    if (envInput) Object.assign(envVars, envInput);
+
+    // Build image for deps
+    const imageTag = `dovu-app-paas-dev-${appName}:latest`;
+    await buildImage(cwd, imageTag, deployConfig.dockerfile, {
+      runtime: deployConfig.runtime,
+      framework: deployConfig.framework,
+      entrypoint: deployConfig.entrypoint,
+      port: deployConfig.port,
+    });
+
+    // Stop any existing dev container
+    const containerName = `dovu-app-paas-dev-${appName}`;
+    try {
+      const proc = Bun.spawn(["docker", "rm", "-f", containerName], { stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+    } catch {}
+
+    // Find free port
+    let hostPort = port || deployConfig.port;
+    if (!port) {
+      try {
+        const proc = Bun.spawn(["lsof", "-i", `:${hostPort}`, "-t"], { stdout: "pipe", stderr: "pipe" });
+        const output = await new Response(proc.stdout).text();
+        if (output.trim()) {
+          for (let p = hostPort + 1; p < hostPort + 100; p++) {
+            const c = Bun.spawn(["lsof", "-i", `:${p}`, "-t"], { stdout: "pipe", stderr: "pipe" });
+            const o = await new Response(c.stdout).text();
+            if (!o.trim()) { hostPort = p; break; }
+          }
+        }
+      } catch {}
+    }
+
+    // Determine watch command
+    let watchCmd: string[];
+    switch (deployConfig.framework) {
+      case "nextjs": watchCmd = ["npx", "next", "dev"]; break;
+      case "laravel": watchCmd = ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]; break;
+      default: watchCmd = ["bun", "--watch", "run", deployConfig.entrypoint]; break;
+    }
+
+    // Start dev container (detached so we can return)
+    const envFlags = Object.entries(envVars).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+    const proc = Bun.spawn(
+      [
+        "docker", "run", "-d",
+        "--name", containerName,
+        "-p", `${hostPort}:${deployConfig.port}`,
+        "-v", `${cwd}:/app`,
+        "-w", "/app",
+        ...envFlags,
+        imageTag,
+        ...watchCmd,
+      ],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const containerId = (await new Response(proc.stdout).text()).trim();
+
+    const url = `http://localhost:${hostPort}`;
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          url,
+          appName,
+          containerId: containerId.slice(0, 12),
+          port: hostPort,
+          watchCommand: watchCmd.join(" "),
+          stopCommand: `docker rm -f ${containerName}`,
+        }, null, 2),
+      }],
+    };
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
