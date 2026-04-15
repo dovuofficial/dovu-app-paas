@@ -1,4 +1,4 @@
-name: "deploy-ops"
+name: "dovu-app-paas"
 description: "Deploy projects to DigitalOcean with branch-aware routing"
 branding:
   icon: "upload-cloud"
