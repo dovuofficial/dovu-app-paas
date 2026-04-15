@@ -204,7 +204,7 @@ server.tool(
   {
     name: z.string().optional().describe("Override app name (defaults to directory name)"),
     domain: z.string().optional().describe("Override domain"),
-    env: z.record(z.string()).optional().describe("Environment variables as key-value pairs"),
+    env: z.record(z.string(), z.string()).optional().describe("Environment variables as key-value pairs"),
   },
   async ({ name, domain, env: envInput }) => {
     const cwd = process.cwd();
@@ -334,7 +334,7 @@ server.tool(
   {
     name: z.string().optional().describe("Override app name"),
     port: z.number().optional().describe("Override host port"),
-    env: z.record(z.string()).optional().describe("Environment variables as key-value pairs"),
+    env: z.record(z.string(), z.string()).optional().describe("Environment variables as key-value pairs"),
   },
   async ({ name, port, env: envInput }) => {
     const cwd = process.cwd();

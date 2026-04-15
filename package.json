@@ -19,6 +19,7 @@
   "scripts": {
     "test": "bun test",
     "dev": "bun run src/cli/index.ts",
+    "mcp": "bun run src/mcp/index.ts",
     "typecheck": "bun x tsc --noEmit"
   },
   "bin": {
