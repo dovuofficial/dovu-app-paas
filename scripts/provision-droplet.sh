@@ -282,6 +282,80 @@ EOF
   warn "Make sure UFW rule for port ${SSH_PORT} is active before disconnecting!"
 fi
 
+# ── Bun runtime ────────────────────────────────────────
+step "Installing Bun"
+
+if command -v bun &>/dev/null; then
+  warn "Bun already installed: $(bun --version)"
+else
+  curl -fsSL https://bun.sh/install | bash
+  ln -sf /root/.bun/bin/bun /usr/local/bin/bun
+  log "Bun installed: $(bun --version)"
+fi
+
+# ── MCP Server ─────────────────────────────────────────
+step "Setting up remote MCP server"
+
+MCP_DIR="/opt/deploy-ops"
+MCP_WORKSPACE="/opt/deploy-ops/workspace"
+
+# Clone or update repo
+if [ -d "$MCP_DIR/.git" ]; then
+  cd "$MCP_DIR" && git pull --ff-only
+  warn "deploy-ops repo updated"
+else
+  git clone git@github.com:dovuofficial/dovu-app-paas.git "$MCP_DIR"
+  log "deploy-ops repo cloned"
+fi
+
+cd "$MCP_DIR"
+bun install --frozen-lockfile
+log "Dependencies installed"
+
+# Create workspace directory for state
+mkdir -p "$MCP_WORKSPACE/.dovu-app-paas"
+chown -R deploy:deploy "$MCP_WORKSPACE"
+
+# Write host provider config
+cat > "$MCP_WORKSPACE/.dovu-app-paas/config.json" << EOF
+{
+  "provider": "host",
+  "host": {
+    "baseDomain": "${DOMAIN}"
+  }
+}
+EOF
+chown deploy:deploy "$MCP_WORKSPACE/.dovu-app-paas/config.json"
+log "Workspace configured"
+
+# Create env file for secrets
+mkdir -p /etc/deploy-ops
+if [ ! -f /etc/deploy-ops/env ]; then
+  GENERATED_SECRET=$(openssl rand -hex 24)
+  echo "TEAM_SECRET=${GENERATED_SECRET}" > /etc/deploy-ops/env
+  chmod 600 /etc/deploy-ops/env
+  log "Team secret generated: ${GENERATED_SECRET}"
+  warn "Save this secret — you'll share it with your team"
+else
+  warn "Team secret already exists at /etc/deploy-ops/env"
+fi
+
+# Install systemd service
+cp "$MCP_DIR/scripts/deploy-ops-mcp.service" /etc/systemd/system/
+sed -i "s/apps.dovu.ai/${DOMAIN}/g" /etc/systemd/system/deploy-ops-mcp.service
+systemctl daemon-reload
+systemctl enable deploy-ops-mcp
+systemctl start deploy-ops-mcp
+log "MCP server service installed and started"
+
+# Install nginx config for MCP endpoint
+cp "$MCP_DIR/scripts/mcp-nginx.conf" /etc/nginx/conf.d/deploy-ops-mcp.conf
+sed -i "s/apps.dovu.ai/${DOMAIN}/g" /etc/nginx/conf.d/deploy-ops-mcp.conf
+nginx -t && systemctl reload nginx
+log "nginx configured for mcp.${DOMAIN}"
+
+chown -R deploy:deploy "$MCP_DIR"
+
 # ── Verify ──────────────────────────────────────────────
 step "Verification"
 
@@ -306,6 +380,11 @@ echo "  Domain:     https://*.${DOMAIN}"
 echo "  SSL:        Let's Encrypt wildcard (auto-renewing)"
 echo "  SSH user:   deploy (port ${SSH_PORT})"
 echo "  Containers: bound to 127.0.0.1, 256MB limit, auto-restart"
+echo "  MCP server: https://mcp.${DOMAIN}/mcp"
+echo ""
+echo "  Team members connect via Claude Code:"
+echo ""
+echo "    claude mcp add deploy-ops --transport http https://mcp.${DOMAIN}/mcp --header \"Authorization: Bearer \$(cat /etc/deploy-ops/env | cut -d= -f2)\""
 echo ""
 echo "  On your local machine, create the config:"
 echo ""
