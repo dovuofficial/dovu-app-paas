@@ -1,0 +1,18 @@
+[Unit]
+Description=deploy-ops MCP Server
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/opt/deploy-ops
+ExecStart=/usr/local/bin/bun run src/mcp/remote.ts
+Restart=always
+RestartSec=5
+Environment=DEPLOY_OPS_DOMAIN=apps.dovu.ai
+Environment=MCP_PORT=8888
+Environment=MCP_WORKSPACE=/opt/deploy-ops/workspace
+EnvironmentFile=-/etc/deploy-ops/env
+
+[Install]
+WantedBy=multi-user.target
