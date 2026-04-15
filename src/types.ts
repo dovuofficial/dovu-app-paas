@@ -35,8 +35,13 @@ export interface DigitalOceanProviderConfig {
   baseDomain: string;
 }
 
+export interface HostProviderConfig {
+  baseDomain: string;
+}
+
 export interface AppConfig {
-  provider: "local" | "digitalocean";
+  provider: "local" | "digitalocean" | "host";
   local?: LocalProviderConfig;
   digitalocean?: DigitalOceanProviderConfig;
+  host?: HostProviderConfig;
 }
