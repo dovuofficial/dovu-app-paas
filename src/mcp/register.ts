@@ -13,7 +13,7 @@ import type { DeploymentRecord } from "@/types";
 import { formatDeploymentList, formatStatus } from "./tools";
 import type { ContainerStats } from "./tools";
 
-function slugify(name: string): string {
+export function slugify(name: string): string {
   return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
