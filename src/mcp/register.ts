@@ -196,7 +196,19 @@ export function registerTools(server: McpServer, cwd: string) {
 
   server.tool(
     "deploy",
-    "Deploy a project to the configured droplet. Provide source as a base64-encoded tar.gz to deploy code remotely, or omit to deploy from the local working directory.",
+    `Deploy a project to the configured droplet.
+
+Provide source as a base64-encoded tar.gz to deploy code remotely, or omit to deploy from the local working directory.
+
+IMPORTANT: The application MUST listen on port 3000. The platform's reverse proxy forwards all traffic to this port inside the container.
+
+Recommended project structures:
+- Bun server: index.ts with Bun.serve({ port: 3000 }). Best for APIs and dynamic apps.
+- Astro/Vite/static: Build locally, include a Bun file server (index.ts) that serves the dist/ folder on port 3000. Astro is recommended for web/frontend deployments.
+- Next.js: Detected automatically. Set output: "standalone" in next.config.
+- Custom Dockerfile: If a Dockerfile is present, it will be used. Ensure it EXPOSEs port 3000.
+
+When using source, create the tar.gz from the project root: tar -czf project.tar.gz -C /path/to/project .`,
     {
       name: z.string().optional().describe("App name (required when providing source)"),
       domain: z.string().optional().describe("Override domain"),
@@ -210,137 +222,159 @@ export function registerTools(server: McpServer, cwd: string) {
 
       const provider = resolveProvider(config!);
       const steps: string[] = [];
+      let stage = "setup";
 
-      // Determine project directory
-      let projectDir = cwd;
-      if (source) {
-        if (!name) {
-          return { content: [{ type: "text", text: "Error: 'name' is required when deploying with 'source'" }] };
-        }
-        // Unpack source to workspace/{name}/
-        projectDir = join(cwd, name);
-        await mkdir(projectDir, { recursive: true });
-        const tarball = Buffer.from(source, "base64");
-        const tarPath = join(tmpdir(), `deploy-${name}-${Date.now()}.tar.gz`);
-        await writeFile(tarPath, tarball);
-        await $`tar -xzf ${tarPath} -C ${projectDir}`.quiet();
-        await rm(tarPath, { force: true });
-        steps.push(`Unpacked source to ${projectDir}`);
-      }
-
-      // 1. Inspect project
-      const deployConfig = await inspectProject(projectDir);
-      const appName = name || deployConfig.name;
-      const deployerSlug = deployer ? slugify(deployer) : null;
-      const subdomainName = deployerSlug ? `${appName}-${deployerSlug}` : appName;
-      steps.push(`Detected: ${deployConfig.runtime}/${deployConfig.framework}, entrypoint=${deployConfig.entrypoint}, port=${deployConfig.port}`);
-
-      // 2. Collect env vars
-      const envVars: Record<string, string> = {};
       try {
-        const envContent = await readFile(join(projectDir, ".env"), "utf-8");
-        for (const line of envContent.split("\n")) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith("#")) continue;
-          const eqIndex = trimmed.indexOf("=");
-          if (eqIndex === -1) continue;
-          const key = trimmed.slice(0, eqIndex).trim();
-          let value = trimmed.slice(eqIndex + 1).trim();
-          if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-            value = value.slice(1, -1);
+        // Determine project directory
+        let projectDir = cwd;
+        if (source) {
+          if (!name) {
+            return { content: [{ type: "text", text: "Error: 'name' is required when deploying with 'source'" }] };
           }
-          envVars[key] = value;
+          stage = "unpack_source";
+          projectDir = join(cwd, name);
+          await mkdir(projectDir, { recursive: true });
+          const tarball = Buffer.from(source, "base64");
+          const tarPath = join(tmpdir(), `deploy-${name}-${Date.now()}.tar.gz`);
+          await writeFile(tarPath, tarball);
+          await $`tar -xzf ${tarPath} -C ${projectDir}`.quiet();
+          await rm(tarPath, { force: true });
+          steps.push(`Unpacked source to ${projectDir}`);
         }
-      } catch {}
 
-      // Override with provided env vars
-      if (envInput) Object.assign(envVars, envInput);
+        // 1. Inspect project
+        stage = "inspect_project";
+        const deployConfig = await inspectProject(projectDir);
+        const appName = name || deployConfig.name;
+        const deployerSlug = deployer ? slugify(deployer) : null;
+        const subdomainName = deployerSlug ? `${appName}-${deployerSlug}` : appName;
+        steps.push(`Detected: ${deployConfig.runtime}/${deployConfig.framework}, entrypoint=${deployConfig.entrypoint}, port=${deployConfig.port}`);
 
-      // 3. Build image
-      const imageTag = `dovu-app-paas-${appName}:${Date.now().toString(36)}`;
-      const platform = provider.name === "local" ? undefined : "linux/amd64";
-      await buildImage(projectDir, imageTag, deployConfig.dockerfile, {
-        runtime: deployConfig.runtime,
-        framework: deployConfig.framework,
-        entrypoint: deployConfig.entrypoint,
-        port: deployConfig.port,
-      }, platform);
-      steps.push(`Built image: ${imageTag}`);
+        // 2. Collect env vars
+        const envVars: Record<string, string> = {};
+        try {
+          const envContent = await readFile(join(projectDir, ".env"), "utf-8");
+          for (const line of envContent.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith("#")) continue;
+            const eqIndex = trimmed.indexOf("=");
+            if (eqIndex === -1) continue;
+            const key = trimmed.slice(0, eqIndex).trim();
+            let value = trimmed.slice(eqIndex + 1).trim();
+            if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+              value = value.slice(1, -1);
+            }
+            envVars[key] = value;
+          }
+        } catch {}
+        if (envInput) Object.assign(envVars, envInput);
 
-      // 4. Ship image
-      const tarballPath = join(tmpdir(), `dovu-app-paas-${appName}.tar`);
-      await saveImage(imageTag, tarballPath);
-      await provider.transferImage(tarballPath);
-      await rm(tarballPath, { force: true });
-      steps.push("Image transferred to target");
+        // 3. Build image
+        stage = "image_build";
+        const imageTag = `dovu-app-paas-${appName}:${Date.now().toString(36)}`;
+        const platform = provider.name === "local" ? undefined : "linux/amd64";
+        await buildImage(projectDir, imageTag, deployConfig.dockerfile, {
+          runtime: deployConfig.runtime,
+          framework: deployConfig.framework,
+          entrypoint: deployConfig.entrypoint,
+          port: deployConfig.port,
+        }, platform);
+        steps.push(`Built image: ${imageTag}`);
 
-      // 5. Stop old container
-      const state = await readState(cwd);
-      const existing = state.deployments[appName];
-      const containerName = `dovu-app-paas-${appName}`;
-      try {
-        await provider.exec(`docker stop ${containerName}`);
-        await provider.exec(`docker rm ${containerName}`);
-      } catch {}
+        // 4. Ship image
+        stage = "image_transfer";
+        const tarballPath = join(tmpdir(), `dovu-app-paas-${appName}.tar`);
+        await saveImage(imageTag, tarballPath);
+        await provider.transferImage(tarballPath);
+        await rm(tarballPath, { force: true });
+        steps.push("Image transferred to target");
 
-      // 6. Find free port and start container
-      let hostPort = existing?.hostPort || await getNextPort(cwd);
-      try {
-        const portsOutput = await provider.exec(
-          `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*:\\([0-9]*\\)->.*/\\1/p' | sort -u`
-        );
-        const used = new Set(portsOutput.trim().split("\n").filter(Boolean).map(Number));
-        while (used.has(hostPort)) hostPort++;
-      } catch {}
+        // 5. Stop old container
+        stage = "stop_old_container";
+        const state = await readState(cwd);
+        const existing = state.deployments[appName];
+        const containerName = `dovu-app-paas-${appName}`;
+        try {
+          await provider.exec(`docker stop ${containerName}`);
+          await provider.exec(`docker rm ${containerName}`);
+        } catch {}
 
-      const envFlags = Object.entries(envVars).map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`).join(" ");
-      const containerId = (
+        // 6. Find free port and start container
+        stage = "start_container";
+        let hostPort = existing?.hostPort || await getNextPort(cwd);
+        try {
+          const portsOutput = await provider.exec(
+            `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*:\\([0-9]*\\)->.*/\\1/p' | sort -u`
+          );
+          const used = new Set(portsOutput.trim().split("\n").filter(Boolean).map(Number));
+          while (used.has(hostPort)) hostPort++;
+        } catch {}
+
+        const envFlags = Object.entries(envVars).map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`).join(" ");
+        const containerId = (
+          await provider.exec(
+            `docker run -d --name ${containerName} -p 127.0.0.1:${hostPort}:${deployConfig.port} --memory=256m --cpus=0.5 --restart=unless-stopped ${envFlags} ${imageTag}`
+          )
+        ).trim();
+        steps.push(`Container started: ${containerId.slice(0, 12)}`);
+
+        // 7. Configure nginx
+        stage = "configure_nginx";
+        const deployDomain = domain || `${subdomainName}.${provider.baseDomain}`;
+        const nginxConf = generateNginxConfig({
+          serverName: deployDomain,
+          hostPort,
+          ssl: provider.ssl ?? undefined,
+        });
+        const confB64 = Buffer.from(nginxConf).toString("base64");
         await provider.exec(
-          `docker run -d --name ${containerName} -p 127.0.0.1:${hostPort}:${deployConfig.port} --memory=256m --cpus=0.5 --restart=unless-stopped ${envFlags} ${imageTag}`
-        )
-      ).trim();
-      steps.push(`Container started: ${containerId.slice(0, 12)}`);
+          `echo '${confB64}' | base64 -d > ${provider.nginxConfDir}/dovu-app-paas-${appName}.conf`
+        );
+        await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
+        steps.push("Nginx configured");
 
-      // 7. Configure nginx
-      const deployDomain = domain || `${subdomainName}.${provider.baseDomain}`;
-      const nginxConf = generateNginxConfig({
-        serverName: deployDomain,
-        hostPort,
-        ssl: provider.ssl ?? undefined,
-      });
-      const confB64 = Buffer.from(nginxConf).toString("base64");
-      await provider.exec(
-        `echo '${confB64}' | base64 -d > ${provider.nginxConfDir}/dovu-app-paas-${appName}.conf`
-      );
-      await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
-      steps.push("Nginx configured");
+        // 8. Update state
+        stage = "update_state";
+        const now = new Date().toISOString();
+        const record: DeploymentRecord = {
+          name: appName,
+          image: imageTag,
+          port: deployConfig.port,
+          hostPort,
+          domain: deployDomain,
+          containerId: containerId.slice(0, 12),
+          status: "running",
+          env: envVars,
+          createdAt: existing?.createdAt || now,
+          updatedAt: now,
+        };
+        state.deployments[appName] = record;
+        await writeState(cwd, state);
 
-      // 8. Update state
-      const now = new Date().toISOString();
-      const record: DeploymentRecord = {
-        name: appName,
-        image: imageTag,
-        port: deployConfig.port,
-        hostPort,
-        domain: deployDomain,
-        containerId: containerId.slice(0, 12),
-        status: "running",
-        env: envVars,
-        createdAt: existing?.createdAt || now,
-        updatedAt: now,
-      };
-      state.deployments[appName] = record;
-      await writeState(cwd, state);
+        const url = `https://${deployDomain}`;
+        steps.push(`Deployed: ${url}`);
 
-      const url = `https://${deployDomain}`;
-      steps.push(`Deployed: ${url}`);
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({ url, appName, containerId: containerId.slice(0, 12), steps }, null, 2),
-        }],
-      };
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ url, appName, containerId: containerId.slice(0, 12), steps }, null, 2),
+          }],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: `Deploy failed at stage: ${stage}`,
+              stage,
+              message,
+              steps,
+            }, null, 2),
+          }],
+          isError: true,
+        };
+      }
     }
   );
 
