@@ -1,4 +1,4 @@
-# DOVU App PaaS
+# DOVU Agent PaaS
 
 An MCP-native internal app deploy layer for turning AI-built projects into live URLs instantly.
 
