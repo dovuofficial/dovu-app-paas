@@ -74,6 +74,20 @@ To collapse time from idea to live software.
 
 When a trusted team member can say "build me X" and get a live URL back in under a minute, the bottleneck shifts from deployment to imagination. Manual deployment work disappears for small internal tools, previews, prototypes, and AI-generated apps.
 
+## Agent-tested infrastructure
+
+The platform is tested by the agents that use it.
+
+A training harness spawns 100 autonomous Claude agents — each building and deploying a different app across 13 frameworks (Bun, Node, Python, Go, Rust, Ruby, static HTML) and 3 complexity levels. Agents deploy via MCP, verify their endpoints, and file structured GitHub issues reporting success or failure with root cause analysis.
+
+Each run is one generation. Failures feed back as either code fixes (the platform improves) or documented boundaries (the agents get better guidance). The success rate ratchets up across generations because the platform and the agents co-evolve.
+
+**Current results:** 42/44 successful autonomous deploys. The two failures (Rust, Go multi-stage) independently identified the same fix: async deploys with build polling. Those failure reports were written by agents, not humans.
+
+The entire feedback loop — 100 agents, endpoint verification, cleanup, structured reporting — runs on a single small droplet with no additional cost beyond a Claude Max subscription.
+
+See [`harness/`](harness/) for the runner, task matrix, and reports. See [issues](https://github.com/dovuofficial/dovu-app-paas/issues?q=is%3Aissue) for the agent-filed reports.
+
 ## Use cases
 
 **Instant internal tools.** Tell Claude Code to build an admin dashboard, invoice generator, or data viewer. It deploys and you share the URL with your team.
