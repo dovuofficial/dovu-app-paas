@@ -1,19 +1,28 @@
 import { $ } from "bun";
-import { writeFile, rm } from "fs/promises";
+import { writeFile, readFile, rm } from "fs/promises";
 import { join } from "path";
 
 interface DockerfileOptions {
   runtime: "bun" | "node" | "php";
-  framework: "none" | "nextjs" | "laravel";
+  framework: "none" | "nextjs" | "laravel" | "static";
   entrypoint: string;
   port: number;
+}
+
+function generateStaticDockerfile(options: DockerfileOptions): string {
+  return `FROM oven/bun:1-alpine
+WORKDIR /app
+COPY . .
+EXPOSE ${options.port}
+CMD ["bun", "run", "${options.entrypoint}"]
+`;
 }
 
 function generateBunDockerfile(options: DockerfileOptions): string {
   return `FROM oven/bun:1-alpine
 WORKDIR /app
 COPY package.json bun.lockb* ./
-RUN bun install --frozen-lockfile --production
+RUN bun install --frozen-lockfile --production 2>/dev/null || true
 COPY . .
 EXPOSE ${options.port}
 CMD ["bun", "run", "${options.entrypoint}"]
@@ -78,6 +87,8 @@ export function generateDockerfile(options: DockerfileOptions): string {
       return generateNextjsDockerfile(options);
     case "laravel":
       return generateLaravelDockerfile(options);
+    case "static":
+      return generateStaticDockerfile(options);
     default:
       return generateBunDockerfile(options);
   }
@@ -91,7 +102,30 @@ export async function buildImage(
   platform?: string
 ): Promise<string> {
   let generatedDockerfile = false;
+  let generatedPackageJson = false;
   const dockerfilePath = join(projectDir, "Dockerfile");
+  const packageJsonPath = join(projectDir, "package.json");
+
+  // Auto-generate package.json if missing (required for Docker COPY)
+  if (!dockerfile && dockerfileOptions.framework !== "static") {
+    try {
+      await readFile(packageJsonPath, "utf-8");
+    } catch {
+      await writeFile(
+        packageJsonPath,
+        JSON.stringify(
+          {
+            name: "app",
+            private: true,
+            scripts: { start: `bun run ${dockerfileOptions.entrypoint}` },
+          },
+          null,
+          2
+        )
+      );
+      generatedPackageJson = true;
+    }
+  }
 
   if (!dockerfile) {
     await writeFile(dockerfilePath, generateDockerfile(dockerfileOptions));
@@ -99,14 +133,25 @@ export async function buildImage(
   }
 
   try {
-    if (platform) {
-      await $`docker build --platform ${platform} -t ${imageName} ${projectDir}`.quiet();
-    } else {
-      await $`docker build -t ${imageName} ${projectDir}`.quiet();
+    const args = ["docker", "build", ...(platform ? ["--platform", platform] : []), "-t", imageName, projectDir];
+    const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) {
+      const output = stderr || stdout;
+      // Extract the last meaningful lines for the error message
+      const lastLines = output.trim().split("\n").slice(-15).join("\n");
+      throw new Error(`Docker build failed:\n${lastLines}`);
     }
   } finally {
     if (generatedDockerfile) {
       await rm(dockerfilePath, { force: true });
+    }
+    if (generatedPackageJson) {
+      await rm(packageJsonPath, { force: true });
     }
   }
 

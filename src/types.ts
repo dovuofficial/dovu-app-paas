@@ -1,7 +1,7 @@
 export interface DeploymentConfig {
   name: string;
   runtime: "bun" | "node" | "php";
-  framework: "none" | "nextjs" | "laravel";
+  framework: "none" | "nextjs" | "laravel" | "static";
   entrypoint: string;
   port: number;
   dockerfile: string | null; // null = generate one

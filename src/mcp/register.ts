@@ -190,6 +190,15 @@ export function registerTools(server: McpServer, cwd: string) {
         results.push("Removed from state");
       }
 
+      // Clean up unpacked source directory
+      const sourceDir = join(cwd, app);
+      try {
+        await rm(sourceDir, { recursive: true, force: true });
+        results.push("Source directory cleaned");
+      } catch {
+        // Source dir may not exist (local deploys)
+      }
+
       return { content: [{ type: "text", text: `Destroyed '${app}':\n${results.map(r => `  - ${r}`).join("\n")}` }] };
     }
   );

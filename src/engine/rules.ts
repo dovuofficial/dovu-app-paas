@@ -15,7 +15,7 @@ async function fileExists(path: string): Promise<boolean> {
 
 async function detectFramework(
   projectDir: string
-): Promise<{ framework: "none" | "nextjs" | "laravel"; runtime: "bun" | "node" | "php" }> {
+): Promise<{ framework: "none" | "nextjs" | "laravel" | "static"; runtime: "bun" | "node" | "php" }> {
   // Check for Laravel: artisan file or composer.json with laravel/framework
   if (await fileExists(join(projectDir, "artisan"))) {
     return { framework: "laravel", runtime: "php" };
@@ -57,7 +57,7 @@ async function detectRuntime(projectDir: string): Promise<"bun" | "node"> {
 
 async function findEntrypoint(
   projectDir: string,
-  framework: "none" | "nextjs" | "laravel"
+  framework: "none" | "nextjs" | "laravel" | "static"
 ): Promise<string> {
   if (framework === "nextjs") return "package.json"; // next start uses package.json scripts
   if (framework === "laravel") return "artisan"; // php artisan serve
@@ -89,11 +89,62 @@ async function findEntrypoint(
   return "index.ts"; // fallback
 }
 
+async function isStaticSite(projectDir: string): Promise<boolean> {
+  // Static site: has index.html but no TypeScript/JavaScript entrypoint
+  if (!(await fileExists(join(projectDir, "index.html")))) return false;
+
+  // If any entrypoint candidate exists, it's not a pure static site
+  for (const name of ENTRYPOINT_CANDIDATES) {
+    if (await fileExists(join(projectDir, name))) return false;
+    if (await fileExists(join(projectDir, `src/${name}`))) return false;
+  }
+
+  return true;
+}
+
+function generateStaticEntrypoint(): string {
+  return `import { readdir } from "fs/promises";
+import { join, extname } from "path";
+
+const MIME: Record<string, string> = {
+  ".html": "text/html", ".css": "text/css", ".js": "application/javascript",
+  ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
+  ".jpg": "image/jpeg", ".ico": "image/x-icon", ".woff2": "font/woff2",
+  ".woff": "font/woff", ".ttf": "font/ttf",
+};
+
+Bun.serve({
+  port: 3000,
+  async fetch(req) {
+    const url = new URL(req.url);
+    let path = url.pathname === "/" ? "/index.html" : url.pathname;
+    const file = Bun.file(join(".", path));
+    if (await file.exists()) {
+      const mime = MIME[extname(path)] || "application/octet-stream";
+      return new Response(file, { headers: { "Content-Type": mime } });
+    }
+    // Try .html extension for clean URLs
+    const htmlFile = Bun.file(join(".", path + ".html"));
+    if (await htmlFile.exists()) {
+      return new Response(htmlFile, { headers: { "Content-Type": "text/html" } });
+    }
+    // Fallback to index.html for SPA routing
+    const indexFile = Bun.file("./index.html");
+    if (await indexFile.exists()) {
+      return new Response(indexFile, { headers: { "Content-Type": "text/html" } });
+    }
+    return new Response("Not Found", { status: 404 });
+  },
+});
+`;
+}
+
 async function detectPort(
   projectDir: string,
   entrypoint: string,
-  framework: "none" | "nextjs" | "laravel"
+  framework: "none" | "nextjs" | "laravel" | "static"
 ): Promise<number> {
+  if (framework === "static") return 3000;
   if (framework === "nextjs") return 3000;
   if (framework === "laravel") return 8000;
 
@@ -115,12 +166,55 @@ async function detectDockerfile(projectDir: string): Promise<string | null> {
   return null;
 }
 
+async function parseDockerfilePort(projectDir: string): Promise<number | null> {
+  try {
+    const content = await readFile(join(projectDir, "Dockerfile"), "utf-8");
+    const match = content.match(/^EXPOSE\s+(\d+)/m);
+    if (match) return parseInt(match[1], 10);
+  } catch {}
+  return null;
+}
+
+export { generateStaticEntrypoint };
+
 export async function inspectProject(projectDir: string): Promise<DeploymentConfig> {
+  const dockerfile = await detectDockerfile(projectDir);
+  const name = basename(projectDir);
+
+  // If Dockerfile present, prioritize it and parse EXPOSE for port
+  if (dockerfile) {
+    const dockerPort = await parseDockerfilePort(projectDir);
+    const { framework, runtime } = await detectFramework(projectDir);
+    const entrypoint = await findEntrypoint(projectDir, framework);
+    return {
+      name,
+      runtime,
+      framework,
+      entrypoint,
+      port: dockerPort || 3000,
+      dockerfile,
+    };
+  }
+
+  // Check for static site (index.html, no entrypoint files)
+  if (await isStaticSite(projectDir)) {
+    // Generate a Bun file server for static content
+    const serverPath = join(projectDir, "_serve.ts");
+    const { writeFile } = await import("fs/promises");
+    await writeFile(serverPath, generateStaticEntrypoint());
+    return {
+      name,
+      runtime: "bun",
+      framework: "static" as DeploymentConfig["framework"],
+      entrypoint: "_serve.ts",
+      port: 3000,
+      dockerfile: null,
+    };
+  }
+
   const { framework, runtime } = await detectFramework(projectDir);
   const entrypoint = await findEntrypoint(projectDir, framework);
   const port = await detectPort(projectDir, entrypoint, framework);
-  const dockerfile = await detectDockerfile(projectDir);
-  const name = basename(projectDir);
 
   return { name, runtime, framework, entrypoint, port, dockerfile };
 }
