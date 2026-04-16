@@ -6,9 +6,10 @@ import { readState, writeState, getNextPort } from "@/engine/state";
 import { inspectProject } from "@/engine/rules";
 import { buildImage, saveImage } from "@/engine/docker";
 import { generateNginxConfig } from "@/engine/nginx";
-import { readFile, rm } from "fs/promises";
+import { readFile, rm, mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
+import { $ } from "bun";
 import type { DeploymentRecord } from "@/types";
 import { formatDeploymentList, formatStatus } from "./tools";
 import type { ContainerStats } from "./tools";
@@ -195,22 +196,40 @@ export function registerTools(server: McpServer, cwd: string) {
 
   server.tool(
     "deploy",
-    "Deploy the current project to the configured droplet",
+    "Deploy a project to the configured droplet. Provide source as a base64-encoded tar.gz to deploy code remotely, or omit to deploy from the local working directory.",
     {
-      name: z.string().optional().describe("Override app name (defaults to directory name)"),
+      name: z.string().optional().describe("App name (required when providing source)"),
       domain: z.string().optional().describe("Override domain"),
       env: z.record(z.string(), z.string()).optional().describe("Environment variables as key-value pairs"),
       deployer: z.string().optional().describe("Name of the person deploying (used in subdomain, e.g. 'alice')"),
+      source: z.string().optional().describe("Base64-encoded tar.gz of the project source code. When provided, the project is unpacked and deployed on the server."),
     },
-    async ({ name, domain, env: envInput, deployer }) => {
+    async ({ name, domain, env: envInput, deployer, source }) => {
       const { config, error } = getConfigOrError();
       if (error) return { content: [{ type: "text", text: error }] };
 
       const provider = resolveProvider(config!);
       const steps: string[] = [];
 
+      // Determine project directory
+      let projectDir = cwd;
+      if (source) {
+        if (!name) {
+          return { content: [{ type: "text", text: "Error: 'name' is required when deploying with 'source'" }] };
+        }
+        // Unpack source to workspace/{name}/
+        projectDir = join(cwd, name);
+        await mkdir(projectDir, { recursive: true });
+        const tarball = Buffer.from(source, "base64");
+        const tarPath = join(tmpdir(), `deploy-${name}-${Date.now()}.tar.gz`);
+        await writeFile(tarPath, tarball);
+        await $`tar -xzf ${tarPath} -C ${projectDir}`.quiet();
+        await rm(tarPath, { force: true });
+        steps.push(`Unpacked source to ${projectDir}`);
+      }
+
       // 1. Inspect project
-      const deployConfig = await inspectProject(cwd);
+      const deployConfig = await inspectProject(projectDir);
       const appName = name || deployConfig.name;
       const deployerSlug = deployer ? slugify(deployer) : null;
       const subdomainName = deployerSlug ? `${appName}-${deployerSlug}` : appName;
@@ -219,7 +238,7 @@ export function registerTools(server: McpServer, cwd: string) {
       // 2. Collect env vars
       const envVars: Record<string, string> = {};
       try {
-        const envContent = await readFile(join(cwd, ".env"), "utf-8");
+        const envContent = await readFile(join(projectDir, ".env"), "utf-8");
         for (const line of envContent.split("\n")) {
           const trimmed = line.trim();
           if (!trimmed || trimmed.startsWith("#")) continue;
@@ -240,7 +259,7 @@ export function registerTools(server: McpServer, cwd: string) {
       // 3. Build image
       const imageTag = `dovu-app-paas-${appName}:${Date.now().toString(36)}`;
       const platform = provider.name === "local" ? undefined : "linux/amd64";
-      await buildImage(cwd, imageTag, deployConfig.dockerfile, {
+      await buildImage(projectDir, imageTag, deployConfig.dockerfile, {
         runtime: deployConfig.runtime,
         framework: deployConfig.framework,
         entrypoint: deployConfig.entrypoint,
