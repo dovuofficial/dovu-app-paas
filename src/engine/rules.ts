@@ -2,7 +2,11 @@ import { readFile, access } from "fs/promises";
 import { join, basename } from "path";
 import type { DeploymentConfig } from "@/types";
 
-const ENTRYPOINT_CANDIDATES = ["index.ts", "server.ts", "app.ts", "main.ts"];
+const ENTRYPOINT_CANDIDATES = [
+  "index.ts", "server.ts", "app.ts", "main.ts",
+  "index.js", "server.js", "app.js", "main.js",
+  "index.mjs", "server.mjs", "app.mjs",
+];
 
 async function fileExists(path: string): Promise<boolean> {
   try {
@@ -50,7 +54,14 @@ async function detectRuntime(projectDir: string): Promise<"bun" | "node"> {
   try {
     const pkg = JSON.parse(await readFile(join(projectDir, "package.json"), "utf-8"));
     if (pkg.engines?.bun) return "bun";
+    if (pkg.engines?.node) return "node";
+    // If start script uses node explicitly, it's a node project
+    if (pkg.scripts?.start?.match(/^node\s/)) return "node";
   } catch {}
+
+  // If package-lock.json or yarn.lock exists, likely node
+  if (await fileExists(join(projectDir, "package-lock.json"))) return "node";
+  if (await fileExists(join(projectDir, "yarn.lock"))) return "node";
 
   return "bun"; // default
 }
@@ -151,11 +162,17 @@ async function detectPort(
   try {
     const content = await readFile(join(projectDir, entrypoint), "utf-8");
 
-    const bunServeMatch = content.match(/port:\s*(\d+)/);
+    // Match port: 3000 or port: "3000"
+    const bunServeMatch = content.match(/port:\s*["']?(\d+)["']?/);
     if (bunServeMatch) return parseInt(bunServeMatch[1], 10);
 
-    const listenMatch = content.match(/\.listen\((\d+)\)/);
+    // Match .listen(3000) or .listen(3000, ...) or .listen("3000")
+    const listenMatch = content.match(/\.listen\(["']?(\d+)["']?/);
     if (listenMatch) return parseInt(listenMatch[1], 10);
+
+    // Match PORT env with fallback: process.env.PORT || 3000
+    const envPortMatch = content.match(/process\.env\.PORT\s*\|\|\s*(\d+)/);
+    if (envPortMatch) return parseInt(envPortMatch[1], 10);
   } catch {}
 
   return 3000; // fallback
