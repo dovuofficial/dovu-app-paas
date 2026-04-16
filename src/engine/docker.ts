@@ -81,6 +81,17 @@ CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=${options.port}"]
 `;
 }
 
+function generateNodeDockerfile(options: DockerfileOptions): string {
+  return `FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json* yarn.lock* ./
+RUN npm install --production 2>/dev/null || true
+COPY . .
+EXPOSE ${options.port}
+CMD ["node", "${options.entrypoint}"]
+`;
+}
+
 export function generateDockerfile(options: DockerfileOptions): string {
   switch (options.framework) {
     case "nextjs":
@@ -90,6 +101,7 @@ export function generateDockerfile(options: DockerfileOptions): string {
     case "static":
       return generateStaticDockerfile(options);
     default:
+      if (options.runtime === "node") return generateNodeDockerfile(options);
       return generateBunDockerfile(options);
   }
 }
