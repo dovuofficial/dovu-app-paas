@@ -8,7 +8,7 @@ DOVU App PaaS is an MCP-native internal deploy layer for trusted teams.
 It lets Claude Code or a developer turn a project into a live app with a stable name and shareable URL in one step.
 
 - Built for internal tools, previews, and AI-generated apps
-- Runs locally or on a remote box
+- Runs locally, on a remote box, or as a shared remote MCP server
 - Controlled through MCP and CLI
 - Current security model is trusted-team auth, not hardened multi-tenant hosting
 
@@ -21,6 +21,52 @@ It lets Claude Code or a developer turn a project into a live app with a stable 
 5. **Inspect, redeploy, or destroy through MCP.** `logs`, `status`, `ls`, and `destroy` are all available as MCP tools in the same conversation.
 
 The same workflow works from the CLI: `dovu-app deploy --name dashboard`.
+
+## Remote MCP server
+
+The remote MCP server runs on the droplet and lets your whole team deploy through Claude Code without needing SSH keys, repo access, or local setup.
+
+### Team onboarding — one command
+
+```
+claude mcp add deploy-ops --transport http https://mcp.apps.yourdomain.com/mcp --header "Authorization: Bearer <token>"
+```
+
+That's it. The deploy tools appear in their next Claude Code conversation.
+
+### How remote deploy works
+
+When someone says "build me a landing page," Claude Code:
+
+1. Writes the project locally
+2. Tars and base64-encodes the source
+3. Sends it as the `source` parameter to the `deploy` tool
+4. The remote MCP server unpacks it, builds a Docker image, starts a container, configures nginx
+5. Returns a live HTTPS URL like `https://landing-page-alice.apps.yourdomain.com`
+
+The `deployer` parameter bakes identity into the subdomain — you can see who deployed what just by looking at URLs.
+
+### Limits
+
+The `source` parameter sends project code as a base64-encoded tar.gz inside a JSON-RPC message. This is bounded by the nginx `client_max_body_size` on the MCP server.
+
+With a standard `client_max_body_size 10m`, you get room for roughly **7.5MB of gzipped source** before base64 encoding — which translates to approximately **15-20MB of uncompressed** static site content (HTML, CSS, JS, SVGs).
+
+In practice, with images and videos served from a CDN, you could scale to hundreds of pages before hitting the limit. The bottleneck is the nginx body size on the MCP server, not the site itself. A static Astro site with CDN media is essentially just HTML + CSS + JS — it stays small.
+
+For projects that exceed this (large binary assets checked into the repo), you'd use the CLI or GitHub Action deploy path instead.
+
+### Token management
+
+The bearer token is stored on the droplet at `/etc/deploy-ops/env`. To rotate it:
+
+```bash
+ssh root@your-droplet
+echo "TEAM_SECRET=$(openssl rand -hex 24)" > /etc/deploy-ops/env
+systemctl restart deploy-ops-mcp
+```
+
+Share the new token with your team. Everyone re-adds the MCP server with the updated token.
 
 ## Why it exists
 
@@ -48,6 +94,8 @@ When a trusted team member can say "build me X" and get a live URL back in under
 
 **Core: deploy engine + MCP server.** The core repo is the product. The MCP server (`src/mcp/`) exposes `deploy`, `dev`, `ls`, `status`, `logs`, and `destroy` as tools. The CLI (`src/cli/`) provides the same commands from the terminal. The deploy engine handles framework detection, container builds, routing, and state.
 
+**Remote MCP server.** The HTTP transport (`src/mcp/remote.ts`) runs on the droplet behind nginx with bearer token auth. Team members connect via Claude Code with a single command. Code is uploaded as base64 tar.gz in the `source` parameter.
+
 **GitHub Action: CI and branch preview wrapper.** The [GitHub Action](action.yml) wraps the core CLI for CI workflows. It deploys on push, destroys on branch delete, produces branch-aware URLs, and outputs the live URL for PR comments. The action is a distribution channel, not the product identity.
 
 ## Security
@@ -60,6 +108,16 @@ Not positioned as hardened zero-trust infrastructure. Multi-tenant isolation, pe
 
 ## Getting started
 
+### Remote MCP (recommended for teams)
+
+Provision a droplet with the setup script, then share the onboarding command with your team:
+
+```
+claude mcp add deploy-ops --transport http https://mcp.apps.yourdomain.com/mcp --header "Authorization: Bearer <token>"
+```
+
+See [docs/digitalocean.md](docs/digitalocean.md) for droplet provisioning.
+
 ### Local
 
 ```bash
@@ -70,7 +128,7 @@ dovu-app deploy
 # Live at http://your-project.ops.localhost
 ```
 
-### DigitalOcean
+### DigitalOcean (CLI)
 
 ```bash
 dovu-app init          # select "digitalocean", enter IP, SSH key, base domain
@@ -78,8 +136,6 @@ cd your-project
 dovu-app deploy
 # Live at https://your-project.apps.yourdomain.com (with SSL)
 ```
-
-See [docs/digitalocean.md](docs/digitalocean.md) for droplet provisioning.
 
 ## Commands
 
@@ -103,11 +159,24 @@ Deploy options:
 -e KEY=VALUE        Set environment variables (repeatable)
 ```
 
+## MCP tools
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `deploy` | `name?`, `domain?`, `env?`, `deployer?`, `source?` | Deploy a project. Pass `source` (base64 tar.gz) for remote uploads. |
+| `dev` | `name?`, `port?`, `env?`, `deployer?` | Start hot-reload dev mode |
+| `ls` | — | List all deployments with live status |
+| `status` | `app` | CPU, memory, uptime, restart count, warnings |
+| `logs` | `app`, `lines?` | Get recent container logs |
+| `destroy` | `app` | Remove deployment completely |
+
 ## Providers
 
 **Local** — Docker-in-Docker on your machine. Apps get `*.ops.localhost` domains. Good for development and testing.
 
 **DigitalOcean** — Remote droplet via SSH. Images are cross-compiled for `linux/amd64` and transferred via SCP. Wildcard SSL via Let's Encrypt. One provisioning script sets up everything.
+
+**Host** — Direct shell execution on the droplet. Used by the remote MCP server when running on the same machine as Docker. No SSH overhead.
 
 ## Framework detection
 
@@ -140,7 +209,7 @@ The deploy engine auto-detects runtime, framework, entrypoint, and port from you
 └──────────────────────────────────────────────────┘
 ```
 
-### Remote
+### Remote (CLI / GitHub Action)
 
 ```
 ┌───────────────────┐         ┌──────────────────────────────┐
@@ -148,6 +217,18 @@ The deploy engine auto-detects runtime, framework, entrypoint, and port from you
 │                    │ ──────► │                                │
 │  dovu-app CLI      │  SCP    │  Docker + nginx + SSL         │
 │  docker build      │ ──────► │  *.apps.yourdomain.com        │
+└───────────────────┘         └──────────────────────────────┘
+```
+
+### Remote MCP (team deploy)
+
+```
+┌───────────────────┐         ┌──────────────────────────────┐
+│   Claude Code      │  HTTPS  │         Droplet               │
+│                    │ ──────► │                                │
+│  writes code       │  bearer │  Bun.serve() MCP server       │
+│  tar.gz + base64   │  token  │  unpack ► docker build ► run  │
+│  deploy tool call  │         │  nginx ► SSL ► live URL       │
 └───────────────────┘         └──────────────────────────────┘
 ```
 
@@ -159,4 +240,4 @@ bun test
 
 ## Tech stack
 
-[Bun](https://bun.sh) / TypeScript / Docker / nginx / MCP
+[Bun](https://bun.sh) / TypeScript / Docker / nginx / MCP / StreamableHTTP
