@@ -120,6 +120,51 @@ describe("validateTarball — rejection", () => {
     }, "symlink.tar.gz");
     await expect(validateTarball(tar)).rejects.toThrow(/symlink|link/i);
   });
+
+  test("rejects a regular file whose literal name contains ' -> ../../etc/evil'", async () => {
+    // Regression guard for a critical parser bug: unconditionally stripping
+    // the " -> " suffix would truncate "safe -> ../../etc/evil" to "safe"
+    // and let the traversal check pass. We hand-build a ustar entry with
+    // typeflag '0' (regular file) carrying the malicious literal name,
+    // then:
+    //  1) sanity-check that tar -tzvf shows the raw name intact, and
+    //  2) assert validateTarball rejects it (on the embedded ".." segment).
+    // Note: "../../" has a bare ".." segment after split-by-"/", which is
+    // what the traversal check looks for — a single-level "../evil" only
+    // contains a "safe -> .." pseudo-segment, not a bare "..".
+    const evilName = "safe -> ../../etc/evil";
+    const tarBytes = buildMaliciousUstarGzip(evilName, "pwned\n");
+    const tarPath = join(workDir, "arrow-in-name.tar.gz");
+    await writeFile(tarPath, tarBytes);
+
+    // Sanity: confirm tar's own listing carries the unsanitised name.
+    const listing = await $`tar -tzvf ${tarPath}`.quiet();
+    expect(listing.stdout.toString()).toContain(evilName);
+
+    await expect(validateTarball(tarPath)).rejects.toThrow(/\.\.|traversal/i);
+  });
+
+  test("rejects PAX long-name (PaxHeader) entries", async () => {
+    // Guard for the PAX long-name mitigation. Hand-build a ustar entry
+    // whose name contains a PaxHeader segment (what GNU tar in PAX mode
+    // emits when a path exceeds 100 bytes); assert both the parser sees
+    // the segment and the validator rejects on it.
+    const paxName = "./PaxHeader/12345/reallylongname";
+    const tarBytes = buildMaliciousUstarGzip(paxName, "pax-attr\n");
+    const tarPath = join(workDir, "pax.tar.gz");
+    await writeFile(tarPath, tarBytes);
+
+    // Parser-level check (per task brief): listing-line name contains the
+    // PaxHeader segment.
+    const listing = await $`tar -tzvf ${tarPath}`.quiet();
+    const line = listing.stdout.toString().trim();
+    const parsed = parseTarListingLine(line);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.name.split("/")).toContain("PaxHeader");
+
+    // Validator-level check: whole tarball is rejected.
+    await expect(validateTarball(tarPath)).rejects.toThrow(/PaxHeader|PAX/);
+  });
 });
 
 describe("parseTarListingLine — cross-tar parser", () => {
@@ -133,6 +178,19 @@ describe("parseTarListingLine — cross-tar parser", () => {
     expect(parsed).not.toBeNull();
     expect(parsed!.perms.startsWith("l")).toBe(true);
     expect(parsed!.name).toBe("evil");
+  });
+
+  // Critical regression guard: a regular file's name must NOT be truncated
+  // at " -> ". Only symlink-typeflag entries (perms starting with "l")
+  // carry a link-target suffix. If this test ever fails with name === "safe",
+  // the " -> " stripping has regressed to unconditional and an attacker can
+  // smuggle a "safe -> ../../etc/evil" path past the traversal check.
+  test("does NOT strip ' -> target' from a regular file's name", () => {
+    const line = "-rw-r--r--  0 user wheel  5 Apr 20 10:03 safe -> ../evil";
+    const parsed = parseTarListingLine(line);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.perms.startsWith("-")).toBe(true);
+    expect(parsed!.name).toBe("safe -> ../evil");
   });
 });
 

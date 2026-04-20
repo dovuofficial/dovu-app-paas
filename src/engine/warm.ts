@@ -84,9 +84,9 @@ ${commonBody}}
  *   lrwxr-xr-x  0 hecate wheel       0 Apr 20 10:03 evil -> /etc/passwd
  *   hrw-r--r--  0 hecate wheel       0 Apr 20 10:03 b.txt link to a.txt
  *
- * Detection: on GNU, the second column contains `/` ("owner/group"); on
- * BSD it's a bare number ("0"). We use that to know where the name column
- * starts.
+ * Detection: on BSD, the second column is a bare integer (file-count);
+ * on GNU it's an `owner/group` token. We test col[1] with /^\d+$/ — this
+ * is more robust than a `/` substring check against exotic owner names.
  */
 export function parseTarListingLine(line: string): { perms: string; name: string } | null {
   const cols = line.split(/\s+/).filter((c) => c.length > 0);
@@ -94,18 +94,27 @@ export function parseTarListingLine(line: string): { perms: string; name: string
   const perms = cols[0] ?? "";
   if (perms.length === 0) return null;
 
-  // GNU tar merges owner/group into one token containing "/".
-  // BSD tar emits them as two separate tokens and also a leading "0" column.
-  const isGnu = (cols[1] ?? "").includes("/");
+  // If col[1] is a bare integer, it's BSD's file-count column; otherwise
+  // it's GNU's `owner/group` token. This is robust against edge cases
+  // (e.g. a GNU owner name that happens to lack a "/").
+  const isGnu = !/^\d+$/.test(cols[1] ?? "");
   const nameStartIdx = isGnu ? 5 : 8;
   if (cols.length <= nameStartIdx) return null;
 
   const rest = cols.slice(nameStartIdx).join(" ");
-  // Symlinks are displayed as "name -> target"; hardlinks on BSD as
-  // "name link to target". Strip both so we validate the entry's own name,
-  // not its target.
-  let name = rest.split(" -> ")[0] ?? rest;
-  name = name.split(" link to ")[0] ?? name;
+  // Link-target suffixes are only meaningful for link typeflags: symlinks
+  // render as "name -> target" (perms start with 'l') and BSD hardlinks
+  // render as "name link to target" (perms start with 'h'). Stripping
+  // these suffixes unconditionally would truncate a regular file whose
+  // literal name contains " -> " or " link to " — an attacker-controlled
+  // path like "safe -> ../../etc/evil" would then parse as "safe" and
+  // bypass the traversal check. Only strip when the typeflag matches.
+  let name = rest;
+  if (perms.startsWith("l")) {
+    name = name.split(" -> ")[0] ?? name;
+  } else if (perms.startsWith("h")) {
+    name = name.split(" link to ")[0] ?? name;
+  }
 
   return { perms, name };
 }
@@ -113,7 +122,9 @@ export function parseTarListingLine(line: string): { perms: string; name: string
 export async function validateTarball(localPath: string): Promise<void> {
   const result = await $`tar -tzvf ${localPath}`.quiet().nothrow();
   if (result.exitCode !== 0) {
-    throw new Error(`Tarball is unreadable: ${result.stderr.toString()}`);
+    throw new Error(
+      `Tarball is unreadable (exit ${result.exitCode}): ${result.stderr.toString()}`,
+    );
   }
   const lines = result.stdout.toString().split("\n").filter((l) => l.length > 0);
 
@@ -133,6 +144,17 @@ export async function validateTarball(localPath: string): Promise<void> {
     }
     if (name.split("/").includes("..")) {
       throw new Error(`Tarball rejected: path traversal in "${name}"`);
+    }
+    // Rejecting all PaxHeader-bearing entries; PAX long-name extension is
+    // not handled; agents must keep paths under 100 bytes. Otherwise, GNU
+    // tar in PAX mode would split a long path across a "./PaxHeader/<pid>/
+    // <name>" listing line plus an x-typeflag entry carrying the real path
+    // in a PAX attribute — and the real path (the one tar extracts at)
+    // wouldn't be in any listing-line name field we could inspect.
+    if (name.split("/").includes("PaxHeader")) {
+      throw new Error(
+        `Tarball rejected: PAX long-name entry "${name}" is not supported (keep paths < 100 bytes)`,
+      );
     }
   }
 }
