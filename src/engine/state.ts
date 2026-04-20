@@ -48,7 +48,7 @@ export async function writeState(baseDir: string, state: StateFile): Promise<voi
 
 export async function getNextPort(baseDir: string): Promise<number> {
   const state = await readState(baseDir);
-  const ports = Object.values(state.deployments).map((d) => d.hostPort);
+  const ports = Object.values(state.deployments).map((d) => d.hostPort ?? 3000);
   if (ports.length === 0) return 3001;
   return Math.max(...ports) + 1;
 }

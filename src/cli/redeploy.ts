@@ -61,7 +61,7 @@ export const redeployCommand = new Command("redeploy-all")
           // Re-write nginx config
           const nginxConf = generateNginxConfig({
             serverName: dep.domain,
-            hostPort: dep.hostPort,
+            hostPort: dep.hostPort!,
             ssl: provider.ssl ?? undefined,
           });
           const confB64 = Buffer.from(nginxConf).toString("base64");
@@ -124,7 +124,7 @@ export const redeployCommand = new Command("redeploy-all")
         try { await provider.exec(`docker rm -f dovu-app-paas-${dep.name}`); } catch {}
 
         // Query used ports
-        let hostPort = dep.hostPort;
+        let hostPort = dep.hostPort!;
         try {
           const portsOutput = await provider.exec(
             `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*:\\([0-9]*\\)->.*/\\1/p' | sort -u`

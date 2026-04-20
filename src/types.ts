@@ -9,15 +9,17 @@ export interface DeploymentConfig {
 
 export interface DeploymentRecord {
   name: string;
-  image: string;
-  port: number;
-  hostPort: number;
+  image?: string;              // optional for static-slot
+  port?: number;               // optional for static-slot
+  hostPort?: number;           // optional for static-slot
   domain: string;
-  containerId: string;
-  status: "running" | "stopped";
-  env: Record<string, string>;
+  containerId?: string;        // optional for static-slot
+  status: "running" | "stopped" | "provisioned";
+  env?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
+  kind?: "container" | "static-slot";   // undefined = "container" (backward compat)
+  currentRevision?: string;    // only for static-slot, e.g. "initial" or "rev-1a2b3c"
 }
 
 export interface StateFile {

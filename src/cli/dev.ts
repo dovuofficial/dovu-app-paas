@@ -185,7 +185,7 @@ export const devCommand = new Command("dev")
         if (existing) {
           const nginxConf = generateNginxConfig({
             serverName: domain,
-            hostPort: existing.hostPort,
+            hostPort: existing.hostPort!,
           });
           try {
             await provider.exec(

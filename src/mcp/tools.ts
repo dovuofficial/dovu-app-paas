@@ -12,15 +12,15 @@ export interface DeploymentListEntry {
   name: string;
   domain: string;
   status: string;
-  containerId: string;
+  containerId: string | undefined;
 }
 
 export interface StatusResult {
   name: string;
   domain: string;
   running: boolean;
-  containerId: string;
-  image: string;
+  containerId: string | undefined;
+  image: string | undefined;
   cpu: string | null;
   memory: string | null;
   restartCount: number;
