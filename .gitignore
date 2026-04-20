@@ -42,3 +42,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # harness secrets & reports
 harness/mcp-config.json
 harness/reports/*.json
+
+# git worktrees (local isolated workspaces)
+.worktrees/
