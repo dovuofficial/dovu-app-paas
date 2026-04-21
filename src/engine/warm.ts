@@ -212,7 +212,7 @@ export async function deployStaticSlot(
     // 2. Validate before doing anything remote
     await validateTarball(localTar);
 
-    const remoteTar = `/tmp/${label}-${revision}.tar.gz`;
+    const remoteTar = `${SITES_ROOT}/.staging-${label}-${revision}.tar.gz`;
     const revDir = `${SITES_ROOT}/${label}-${revision}`;
     const symlinkPath = `${SITES_ROOT}/${label}`;
 
