@@ -240,7 +240,7 @@ v1 supports framework: "static" only. Bun/Node warm containers come in Phase B.`
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({ url, slot: label, placeholder: existing.status === "provisioned", existing: true }, null, 2),
+            text: JSON.stringify({ url, slot: label, placeholder: existing.status === "provisioned", existing: true, kind: existing.kind ?? "container" }, null, 2),
           }],
         };
       }
@@ -267,7 +267,7 @@ v1 supports framework: "static" only. Bun/Node warm containers come in Phase B.`
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({ url, slot: label, placeholder: true }, null, 2),
+            text: JSON.stringify({ url, slot: label, placeholder: true, kind: "static-slot" }, null, 2),
           }],
         };
       } catch (err) {
