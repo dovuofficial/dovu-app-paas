@@ -16,7 +16,7 @@ It lets Claude Code or a developer turn a project into a live app with a stable 
 
 1. **Tell Claude Code what to build.** Describe the app, API, tool, or prototype you want.
 2. **Choose the app name.** A stable name like `dashboard` or `invoice-tool`.
-3. **Claude calls the MCP server.** For static sites, `prewarm` reserves the URL in ~200ms, then `deploy` uploads the built content in chunks. For dynamic apps, `deploy` builds a Docker image and runs it.
+3. **Claude calls the MCP server.** For static sites, `prewarm` reserves the URL in ~200 ms. Then — for any project type — the agent uploads the built tarball via a single `POST /upload` from Bash and references the returned `uploadId` in a tiny `deploy` tool call.
 4. **A URL comes back immediately.** The app is live. Share the link.
 5. **Inspect, redeploy, or destroy through MCP.** `logs`, `status`, `ls`, and `destroy` are all available as MCP tools in the same conversation.
 
@@ -27,12 +27,13 @@ The same workflow works from the CLI: `dovu-app deploy --name dashboard`.
 Static sites (plain HTML, Astro build output, Vite static output, etc.) take a dedicated fast path that skips Docker entirely:
 
 - **`prewarm({name, framework: "static"})`** — allocates a subdomain, writes a placeholder page, configures nginx, reloads. **~200 ms.** The URL is live immediately with a "provisioning…" placeholder so it can be shared before the content is built.
-- **`deploy({name, chunk: {index, total, data}})`** — uploads the built site as many small chunks of base64. The final chunk assembles the payload, extracts it into a fresh revision directory, and flips the nginx-served symlink atomically. **~100 ms per deploy after the first.** Old revisions are cleaned up asynchronously.
-- **`destroy({app})`** — removes the directory, nginx conf, and state record.
+- **`POST /upload`** (from Bash, with bearer auth) — sends the raw tarball bytes in one HTTP request, returns `{uploadId}`. **~500 ms for a 10 KB site**, dominated by TLS handshake.
+- **`deploy({name, uploadId})`** — the server finds the uploaded bytes, validates, extracts into a fresh revision directory, and flips the nginx-served symlink atomically. **~60 ms of server-side work.** Old revisions are cleaned up asynchronously. Total wall-clock from `curl` to live URL: **~1 second**.
+- **`destroy({app, deployer?})`** — removes the directory, nginx conf, and state record.
 
 No container, no image build, no port allocation — nginx serves the files directly from a host directory via symlinked revisions (capistrano-style). Security: the nginx template hardens with `disable_symlinks on from=$document_root` and a dotfile deny block; tarballs are validated before extraction (rejects path traversal, absolute paths, symlinks, hardlinks, PAX long-names).
 
-Dynamic runtimes (Bun, Node, Next.js, Laravel, custom Dockerfile) continue to use the container path — identical developer experience, just with build + ship time.
+Dynamic runtimes (Bun, Node, Next.js, Laravel, custom Dockerfile) use the same upload path — `uploadId` is supported on every `deploy` — just followed by a Docker build + ship + run step instead of a symlink swap.
 
 ## Remote MCP server
 
@@ -52,24 +53,29 @@ When someone says *"build me a landing page,"* Claude Code:
 
 1. Calls `prewarm({name: "landing-page", framework: "static"})` → URL live in ~200 ms with a placeholder.
 2. Writes the project locally.
-3. Tars, gzips, and base64-encodes the built output.
-4. Splits the base64 into small chunks (~2 KB each) and calls `deploy` once per chunk with `chunk: {index, total, data}`.
-5. The server buffers the chunks keyed by app name. The final chunk assembles the payload, validates, extracts into a fresh revision dir, and flips the symlink.
-6. Returns a live HTTPS URL like `https://landing-page-alice.apps.yourdomain.com`.
+3. Tars + gzips the built output (no base64 needed).
+4. In Bash: `curl -X POST https://mcp.apps.yourdomain.com/upload -H "Authorization: Bearer $TOKEN" --data-binary @site.tar.gz` → receives `{"uploadId":"upl_..."}`.
+5. Calls `deploy({name: "landing-page", uploadId: "upl_..."})` — one tiny tool call.
+6. The server reads the uploaded bytes, validates, extracts into a fresh revision dir, flips the symlink.
+7. Returns a live HTTPS URL like `https://landing-page-alice.apps.yourdomain.com`.
 
-For dynamic apps (Bun, Node, Next.js, Laravel, Dockerfile), steps 1 and 4 are replaced by a single `deploy({name, source})` call that triggers a full Docker build + ship + run on the server.
+For dynamic apps (Bun, Node, Next.js, Laravel, Dockerfile), step 6 is replaced by a Docker build + ship + run. Same upload path.
+
+Why the out-of-band upload? LLM agents emit tool-call arguments one token at a time. A 16 KB base64 string in a single tool call can take minutes to stream out of the model. `POST /upload` is a single HTTP request from Bash — bypasses model emission entirely; payload size no longer governs wall-clock time.
 
 The `deployer` parameter bakes identity into the subdomain — you can see who deployed what just by looking at URLs.
 
 ### Upload contract and limits
 
-There are two ways to upload source code to the MCP server's `deploy` tool:
+Three ways to get source code to the MCP server, ranked by speed:
 
-**Chunked upload (preferred, required for anything non-trivial).** Pass `chunk: {index, total, data}` — one call per slice. Each slice is capped at **4 KB** of base64; ~2 KB is recommended. Non-final calls return `{received, total, complete: false}`. The final chunk triggers the real deploy.
+**1. `POST /upload` + `uploadId` (preferred).** Agent runs `curl` in Bash to post the raw tarball bytes to the MCP server's `/upload` endpoint with bearer auth, receives a short `uploadId`, and references it from `deploy({name, uploadId})`. Under a second end-to-end for any payload up to 10 MB. This is the default path in the tool descriptions.
 
-**`source` parameter (fallback for tiny payloads).** Hard-capped at **8 KB** of base64. Anything larger is rejected with an instructional error that tells the caller to switch to chunks. LLM agents emit long tool arguments token-by-token and stall on large `source` blobs, so chunking is almost always the right path anyway.
+**2. `chunk` parameter (fallback).** Multi-part upload of the base64 string via many small tool calls (~2 KB of base64 each). Use when the agent can't reach the `/upload` HTTP endpoint (e.g., stdio-only MCP, air-gapped environments). Slower because the LLM still has to emit each chunk token-by-token.
 
-The end-to-end cap is nginx's `client_max_body_size` on the MCP server (10 MB by default, ~7.5 MB of gzipped source after base64 overhead — covers 15-20 MB of uncompressed HTML/CSS/JS). For projects with large binary assets checked into the repo, use the CLI or GitHub Action deploy path instead.
+**3. `source` parameter (tiny payloads only).** Single base64 string, hard-capped at 8 KB. The server rejects anything larger with an instructional error telling the caller to switch to `uploadId` or `chunk`.
+
+The end-to-end cap is nginx's `client_max_body_size` on the MCP server (set to 12 MB on the remote, ~10 MB of actual tarball after HTTP overhead — covers 20-30 MB of uncompressed HTML/CSS/JS after gzip). For projects with large binary assets checked into the repo, use the CLI or GitHub Action deploy path instead.
 
 ### Token management
 
@@ -123,7 +129,7 @@ See [`harness/`](harness/) for the runner, task matrix, and reports. See [issues
 
 **Core: deploy engine + MCP server.** The core repo is the product. The MCP server (`src/mcp/`) exposes `prewarm`, `deploy`, `dev`, `ls`, `status`, `logs`, and `destroy` as tools. The CLI (`src/cli/`) provides the same commands from the terminal (except `prewarm`, which is MCP-only in v1). The deploy engine handles framework detection, container builds, warm-slot provisioning, routing, and state.
 
-**Remote MCP server.** The HTTP transport (`src/mcp/remote.ts`) runs on the droplet behind nginx with bearer token auth. Team members connect via Claude Code with a single command. Static sites flow through `prewarm` + chunked `deploy` (no Docker). Dynamic apps flow through `deploy` with source, triggering a Docker build + ship on the droplet.
+**Remote MCP server.** The HTTP transport (`src/mcp/remote.ts`) runs on the droplet behind nginx with bearer token auth. Team members connect via Claude Code with a single command. All deploys — static and dynamic — flow through the same `POST /upload` → `deploy({uploadId})` pattern. Static sites then get a symlink swap; dynamic apps get a Docker build + ship + run.
 
 **GitHub Action: CI and branch preview wrapper.** The [GitHub Action](action.yml) wraps the core CLI for CI workflows. It deploys on push, destroys on branch delete, produces branch-aware URLs, and outputs the live URL for PR comments. The action is a distribution channel, not the product identity.
 
@@ -188,17 +194,27 @@ Deploy options:
 -e KEY=VALUE        Set environment variables (repeatable)
 ```
 
-## MCP tools
+## MCP endpoints
+
+### HTTP
+
+| Method + path | Auth | Purpose |
+|---|---|---|
+| `POST /upload` | Bearer | **Preferred upload path.** Body = raw tarball bytes (any Content-Type). Returns `{uploadId, size}`. Hit this from Bash via `curl --data-binary @project.tar.gz` — avoids the LLM-token emission path. Uploads expire after 15 min and are consumed on first use. |
+| `POST /mcp` | Bearer | MCP JSON-RPC endpoint for all tool calls below (plus session init). |
+| `GET /health` | None | Health probe. Returns `{status: "ok"}`. |
+
+### Tools (via `POST /mcp`)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `prewarm` | `name`, `framework: "static"`, `deployer?` | Allocate a URL and serve a placeholder in ~200 ms. Call this first for any static site. |
-| `deploy` | `name?`, `domain?`, `env?`, `deployer?`, `source?`, `chunk?` | Deploy a project. For static warm-slots + any non-trivial payload, use `chunk: {index, total, data}` — one call per small slice. `source` is a fallback for payloads ≤8 KB base64. |
+| `deploy` | `name?`, `domain?`, `env?`, `deployer?`, `uploadId?`, `chunk?`, `source?` | Deploy a project. Use `uploadId` (from `POST /upload`) for anything non-trivial — works on both warm-slot and container paths. `chunk` is a fallback when the upload endpoint isn't reachable. `source` is for payloads ≤8 KB base64. |
 | `dev` | `name?`, `port?`, `env?`, `deployer?` | Start hot-reload dev mode |
 | `ls` | — | List all deployments with live status |
 | `status` | `app` | CPU, memory, uptime, restart count, warnings (static slots report `currentRevision` instead) |
 | `logs` | `app`, `lines?` | Get recent container logs (no-op for static slots — directs to nginx access logs) |
-| `destroy` | `app` | Remove deployment completely |
+| `destroy` | `app`, `deployer?` | Remove deployment completely. `app` accepts either the full label or the base name; pass `deployer` separately if you used it at deploy time. Ambiguous names return a list of candidates instead of silently miss-targeting. |
 
 ## Providers
 
@@ -263,19 +279,26 @@ The deploy engine auto-detects runtime, framework, entrypoint, and port from you
 └───────────────────┘         └──────────────────────────────┘
 ```
 
-### Remote MCP (warm-slot static path)
+### Remote MCP (warm-slot static path via uploadId)
 
 ```
-┌───────────────────┐         ┌──────────────────────────────────┐
-│   Claude Code      │  prewarm│         Droplet                   │
-│                    │ ──────► │  ~200ms: dir + placeholder +      │
-│  1. prewarm        │         │  nginx conf + reload → URL LIVE   │
-│                    │         │                                    │
-│  2. build static   │  chunk  │  buffers chunks keyed by name     │
-│     tar+gzip+b64   │  chunk  │  ...                               │
-│                    │  chunk  │  final chunk: extract → symlink   │
-│  3. deploy chunks  │ ──────► │  swap → URL updates               │
-└───────────────────┘         └──────────────────────────────────┘
+┌───────────────────┐          ┌──────────────────────────────────────┐
+│   Claude Code      │  prewarm │         Droplet                       │
+│                    │ ───────► │  ~200 ms: dir + placeholder + nginx   │
+│  1. prewarm        │          │  conf + reload → URL LIVE             │
+│                    │          │                                        │
+│                    │          │                                        │
+│  2. build static   │  POST    │  /upload                              │
+│     tar -czf       │  /upload │    /tmp/mcp-uploads/upl_...bin        │
+│                    │ ───────► │  returns {uploadId}                   │
+│                    │ (raw     │                                        │
+│                    │  bytes)  │                                        │
+│                    │          │                                        │
+│  3. deploy({       │  /mcp    │  read upload → validate → extract →   │
+│     uploadId })    │ ───────► │  chmod → symlink swap → URL updates   │
+└───────────────────┘          └──────────────────────────────────────┘
+
+Total wall-clock for an 11 KB site: ~1 second (upload ~0.6s over TLS, deploy ~0.1s).
 ```
 
 ## Tests
