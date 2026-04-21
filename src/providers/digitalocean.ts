@@ -45,6 +45,16 @@ export class DigitalOceanProvider implements Provider {
     await this.exec("docker load -i /tmp/image.tar && rm /tmp/image.tar");
   }
 
+  async transferFile(localPath: string, remotePath: string): Promise<void> {
+    const resolvedKey = this.sshKeyPath.replace("~", process.env.HOME || "");
+    const proc = Bun.spawn(
+      ["scp", "-i", resolvedKey, "-o", "StrictHostKeyChecking=no", localPath, `${this.user}@${this.host}:${remotePath}`],
+      { stdout: "inherit", stderr: "inherit" }
+    );
+    const code = await proc.exited;
+    if (code !== 0) throw new Error(`SCP failed with exit code ${code}`);
+  }
+
   async exec(command: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const conn = new Client();
