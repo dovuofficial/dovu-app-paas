@@ -193,8 +193,14 @@ export async function provisionStaticSlot(
   await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
 }
 
+export interface StepTiming {
+  name: string;
+  durationMs: number;
+}
+
 export interface DeployStaticResult {
   revision: string;
+  timings: StepTiming[];
 }
 
 export async function deployStaticSlot(
@@ -202,48 +208,62 @@ export async function deployStaticSlot(
   label: string,
   sourceB64: string
 ): Promise<DeployStaticResult> {
+  const timings: StepTiming[] = [];
+  const step = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+    const t0 = performance.now();
+    try {
+      return await fn();
+    } finally {
+      timings.push({ name, durationMs: Math.round(performance.now() - t0) });
+    }
+  };
+
   // 1. Decode to local tmp
   const ts = Date.now().toString(36);
   const revision = `rev-${ts}`;
   const localTar = join(tmpdir(), `${label}-${revision}.tar.gz`);
-  await writeFile(localTar, Buffer.from(sourceB64.replace(/\s/g, ""), "base64"));
+  await step("decode", async () => {
+    await writeFile(localTar, Buffer.from(sourceB64.replace(/\s/g, ""), "base64"));
+  });
 
   try {
-    // 2. Validate before doing anything remote
-    await validateTarball(localTar);
+    await step("validate", () => validateTarball(localTar));
 
     const remoteTar = `${SITES_ROOT}/.staging-${label}-${revision}.tar.gz`;
     const revDir = `${SITES_ROOT}/${label}-${revision}`;
     const symlinkPath = `${SITES_ROOT}/${label}`;
 
-    // 3. Transfer
-    await provider.transferFile(localTar, remoteTar);
+    await step("transfer", () => provider.transferFile(localTar, remoteTar));
 
-    // 4. Extract on target
-    await provider.exec(`mkdir -p ${revDir}`);
-    await provider.exec(
-      `tar --no-same-owner --no-same-permissions -xzf ${remoteTar} -C ${revDir}`
+    await step("mkdir-rev", () => provider.exec(`mkdir -p ${revDir}`));
+    await step("extract", () =>
+      provider.exec(
+        `tar --no-same-owner --no-same-permissions -xzf ${remoteTar} -C ${revDir}`,
+      ),
     );
 
-    // 4b. Normalise permissions so nginx's www-data user can read.
-    // Tar's `./` root entry carries the staging dir's mode from the uploader —
-    // mkdtemp() commonly creates 0700 dirs, which tar then applies to revDir,
-    // locking out nginx. `chmod -R a+rX` adds read-for-all on files and
-    // execute-for-all on directories (X = execute only if dir or already-executable).
-    await provider.exec(`chmod -R a+rX ${revDir}`);
+    // Normalise permissions so nginx's www-data user can read. Tar's `./` root
+    // entry carries the staging dir's mode from the uploader — mkdtemp() often
+    // creates 0700 dirs and tar applies that to revDir even with
+    // --no-same-permissions, locking out nginx. `chmod -R a+rX` adds read for
+    // all and execute for dirs (or files that are already executable).
+    await step("chmod", () => provider.exec(`chmod -R a+rX ${revDir}`));
 
-    // 5. Atomic symlink swap
-    await provider.exec(`ln -sfn ${label}-${revision} ${symlinkPath}`);
-
-    // 6. Remove the transferred tarball
-    await provider.exec(`rm -rf ${remoteTar}`);
-
-    // 7. Fire-and-forget cleanup of old revs (except the current one)
-    await provider.exec(
-      `find ${SITES_ROOT} -maxdepth 1 -type d -name '${label}-rev-*' ! -name '${label}-${revision}' -exec rm -rf {} + 2>/dev/null || true`
+    await step("symlink-swap", () =>
+      provider.exec(`ln -sfn ${label}-${revision} ${symlinkPath}`),
     );
 
-    return { revision };
+    await step("rm-remote-tar", () => provider.exec(`rm -rf ${remoteTar}`));
+
+    // Fire-and-forget cleanup of old revs (except the current one). If this is
+    // slow (many orphan revs accumulated), the timing breakdown will surface it.
+    await step("cleanup-old-revs", () =>
+      provider.exec(
+        `find ${SITES_ROOT} -maxdepth 1 -type d -name '${label}-rev-*' ! -name '${label}-${revision}' -exec rm -rf {} + 2>/dev/null || true`,
+      ),
+    );
+
+    return { revision, timings };
   } finally {
     await rm(localTar, { force: true });
   }

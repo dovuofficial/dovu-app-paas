@@ -182,33 +182,81 @@ export function registerTools(server: McpServer, cwd: string) {
 
   server.tool(
     "destroy",
-    "Remove a deployment completely (container, image, nginx config)",
-    { app: z.string().describe("App name to destroy") },
-    async ({ app }) => {
+    `Remove a deployment completely. Accepts either the full resolved app label in 'app', or the name + optional 'deployer' used at prewarm/deploy time — the server composes the label the same way (name-deployer). If the app isn't found in state, returns the list of existing labels so the caller can pick the right one.`,
+    {
+      app: z.string().describe("Full app label (e.g. 'landing-page-alice') OR the base name — if you used 'deployer' at deploy time, pass it as the separate 'deployer' param here, or pass the full combined label."),
+      deployer: z.string().optional().describe("Optional deployer name used at deploy time. When provided, the label resolved is '{slugify(app)}-{slugify(deployer)}', matching prewarm/deploy's resolution."),
+    },
+    async ({ app, deployer }) => {
       const { config, error } = getConfigOrError();
       if (error) return { content: [{ type: "text", text: error }] };
 
       const provider = resolveProvider(config!);
 
       const state = await readState(cwd);
-      const dep = state.deployments[app];
+
+      // Resolve the target label the same way prewarm/deploy do. If the caller
+      // passes a deployer we always apply the suffix; otherwise we try the raw
+      // 'app' first (may already be a full label), falling back to a fuzzy
+      // lookup against known `{app}-*` keys if the exact match misses.
+      let label: string;
+      if (deployer) {
+        label = `${slugify(app)}-${slugify(deployer)}`;
+      } else if (state.deployments[app]) {
+        label = app;
+      } else {
+        const base = slugify(app);
+        const candidates = Object.keys(state.deployments).filter(
+          (k) => k === base || k.startsWith(`${base}-`),
+        );
+        if (candidates.length === 1) {
+          label = candidates[0];
+        } else if (candidates.length > 1) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: `ambiguous app name '${app}'`,
+                candidates,
+                action: "Pass the full label in 'app', or specify 'deployer' to disambiguate.",
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        } else {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: `deployment '${app}' not found`,
+                known: Object.keys(state.deployments),
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
+      }
+
+      const dep = state.deployments[label];
 
       // --- Warm-slot branch: early return, container path below is untouched ---
       if (dep?.kind === "static-slot") {
         const results: string[] = [];
         try {
-          await destroyStaticSlot(provider, app);
-          results.push("Static slot removed (dir + nginx conf + reload)");
+          await destroyStaticSlot(provider, label);
+          results.push(`Static slot '${label}' removed (dir + nginx conf + reload)`);
         } catch (err) {
           results.push(`Static slot removal failed: ${err instanceof Error ? err.message : String(err)}`);
         }
-        delete state.deployments[app];
+        delete state.deployments[label];
         await writeState(cwd, state);
         results.push("Removed from state");
-        return { content: [{ type: "text", text: `Destroyed '${app}':\n${results.map(r => `  - ${r}`).join("\n")}` }] };
+        return { content: [{ type: "text", text: `Destroyed '${label}':\n${results.map(r => `  - ${r}`).join("\n")}` }] };
       }
       // --- End warm-slot branch ---
 
+      // From here on, 'app' in the container path's commands uses the resolved label.
+      app = label;
       const containerName = `dovu-app-paas-${app}`;
       const results: string[] = [];
 
@@ -405,7 +453,8 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
         index: z.number().int().min(0).describe("Zero-based chunk index"),
         total: z.number().int().min(1).max(1000).describe("Total number of chunks (1-1000)"),
         data: z.string().describe("This chunk's slice of the full base64-encoded tar.gz. Max 4096 chars (server enforces); ~2048 recommended."),
-      }).optional().describe("PREFERRED upload path. Multi-part chunked upload — each call carries one slice of the base64. Buffered server-side, keyed by app name. The final chunk triggers the real deploy and returns the URL."),
+        sha256Full: z.string().length(16).optional().describe("Optional integrity check on the final chunk: first 16 hex chars of SHA-256 over the FULL concatenated base64 payload (not this chunk alone). If provided on the final chunk, the server compares it to its own hash of the assembled payload and rejects on mismatch. Use this to catch wire corruption."),
+      }).optional().describe("PREFERRED upload path. Multi-part chunked upload — each call carries one slice of the base64. Buffered server-side, keyed by app name. The final chunk triggers the real deploy and returns the URL. Each chunk response includes { chunkSha, chunkLen } so the client can verify what the server received."),
     },
     async ({ name, domain, env: envInput, deployer, source, chunk }) => {
       const { config, error } = getConfigOrError();
@@ -471,8 +520,30 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
                   received: receipt.received,
                   total: receipt.total,
                   complete: false,
+                  chunkSha: receipt.chunkSha,
+                  chunkLen: receipt.chunkLen,
                 }, null, 2),
               }],
+            };
+          }
+          // Optional client-side integrity check: if the final chunk carried
+          // a sha256Full hint, compare it to what we assembled. Mismatch ≡
+          // wire corruption somewhere between agent and server — surface the
+          // observed vs expected hashes and abort before we write garbage to
+          // disk.
+          if (chunk.sha256Full && receipt.assembledSha !== chunk.sha256Full) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  error: "assembled payload sha256 mismatch",
+                  expectedSha: chunk.sha256Full,
+                  observedSha: receipt.assembledSha,
+                  observedLen: receipt.assembledLen,
+                  action: "Wire corruption between client and server. Re-send the upload. If the mismatch persists, inspect each chunk's response chunkSha against the client-side hash of that chunk to localize which chunk was mutated.",
+                }, null, 2),
+              }],
+              isError: true,
             };
           }
           // Complete — substitute the assembled payload into `source` and
@@ -506,7 +577,9 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
             };
           }
           try {
-            const { revision } = await deployStaticSlot(provider, label, source);
+            const deployT0 = performance.now();
+            const { revision, timings } = await deployStaticSlot(provider, label, source);
+            const totalMs = Math.round(performance.now() - deployT0);
             const now = new Date().toISOString();
             slot.status = "running";
             slot.currentRevision = revision;
@@ -520,7 +593,8 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
                   url,
                   appName: label,
                   revision,
-                  steps: ["Validated", "Transferred", "Extracted", "Swapped"],
+                  totalMs,
+                  timings,
                 }, null, 2),
               }],
             };
