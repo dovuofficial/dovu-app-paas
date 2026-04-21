@@ -15,4 +15,7 @@ export interface Provider {
 
   /** Tear down the provider (e.g., remove mini-droplet) */
   teardown(): Promise<void>;
+
+  /** Transfer an arbitrary local file to an arbitrary remote path */
+  transferFile(localPath: string, remotePath: string): Promise<void>;
 }

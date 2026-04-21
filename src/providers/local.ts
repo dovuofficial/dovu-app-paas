@@ -57,6 +57,11 @@ export class LocalProvider implements Provider {
     await $`docker exec ${CONTAINER_NAME} rm /root/image.tar`.quiet();
   }
 
+  async transferFile(localPath: string, remotePath: string): Promise<void> {
+    // Mirror transferImage's handling: use docker cp, but no docker load
+    await $`docker cp ${localPath} ${CONTAINER_NAME}:${remotePath}`.quiet();
+  }
+
   async exec(command: string): Promise<string> {
     const result = await $`docker exec ${CONTAINER_NAME} sh -c ${command}`.text();
     return result;

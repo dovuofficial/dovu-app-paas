@@ -26,6 +26,10 @@ export class HostProvider implements Provider {
     await $`rm ${tarballPath}`.quiet();
   }
 
+  async transferFile(localPath: string, remotePath: string): Promise<void> {
+    await $`cp ${localPath} ${remotePath}`.quiet();
+  }
+
   async exec(command: string): Promise<string> {
     const result = await $`sh -c ${command}`.text();
     return result;

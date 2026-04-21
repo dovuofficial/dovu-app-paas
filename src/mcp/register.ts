@@ -6,6 +6,7 @@ import { readState, writeState, getNextPort } from "@/engine/state";
 import { inspectProject } from "@/engine/rules";
 import { buildImage, saveImage } from "@/engine/docker";
 import { generateNginxConfig } from "@/engine/nginx";
+import { provisionStaticSlot, deployStaticSlot, destroyStaticSlot } from "@/engine/warm";
 import { readFile, rm, mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -43,6 +44,16 @@ export function registerTools(server: McpServer, cwd: string) {
     // Reconcile live status
     const provider = resolveProvider(config!);
     for (const dep of Object.values(deployments)) {
+      if (dep.kind === "static-slot") {
+        try {
+          // symlink resolves to an existing directory?
+          await provider.exec(`test -d /opt/deploy-ops/sites/${dep.name}`);
+          dep.status = dep.currentRevision === "initial" ? "provisioned" : "running";
+        } catch {
+          dep.status = "stopped";
+        }
+        continue;
+      }
       try {
         const running = await provider.exec(`docker inspect -f '{{.State.Running}}' dovu-app-paas-${dep.name}`);
         dep.status = running.trim() === "true" ? "running" : "stopped";
@@ -72,6 +83,24 @@ export function registerTools(server: McpServer, cwd: string) {
           ? `Available apps: ${available.join(", ")}`
           : "No deployments found.";
         return { content: [{ type: "text", text: `Deployment '${app}' not found. ${hint}` }] };
+      }
+
+      if (dep.kind === "static-slot") {
+        const provider = resolveProvider(config!);
+        let alive = false;
+        try {
+          await provider.exec(`test -d /opt/deploy-ops/sites/${app}`);
+          alive = true;
+        } catch {}
+        const result = {
+          name: dep.name,
+          domain: dep.domain,
+          running: alive,
+          kind: "static-slot" as const,
+          currentRevision: dep.currentRevision ?? null,
+          warnings: [] as string[],
+        };
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       const provider = resolveProvider(config!);
@@ -129,6 +158,15 @@ export function registerTools(server: McpServer, cwd: string) {
         return { content: [{ type: "text", text: `Deployment '${app}' not found. ${hint}` }] };
       }
 
+      if (state.deployments[app].kind === "static-slot") {
+        return {
+          content: [{
+            type: "text",
+            text: "Static sites have no container logs. Check nginx access logs on the droplet at /var/log/nginx/access.log.",
+          }],
+        };
+      }
+
       const provider = resolveProvider(config!);
       const containerName = `dovu-app-paas-${app}`;
 
@@ -150,6 +188,26 @@ export function registerTools(server: McpServer, cwd: string) {
       if (error) return { content: [{ type: "text", text: error }] };
 
       const provider = resolveProvider(config!);
+
+      const state = await readState(cwd);
+      const dep = state.deployments[app];
+
+      // --- Warm-slot branch: early return, container path below is untouched ---
+      if (dep?.kind === "static-slot") {
+        const results: string[] = [];
+        try {
+          await destroyStaticSlot(provider, app);
+          results.push("Static slot removed (dir + nginx conf + reload)");
+        } catch (err) {
+          results.push(`Static slot removal failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        delete state.deployments[app];
+        await writeState(cwd, state);
+        results.push("Removed from state");
+        return { content: [{ type: "text", text: `Destroyed '${app}':\n${results.map(r => `  - ${r}`).join("\n")}` }] };
+      }
+      // --- End warm-slot branch ---
+
       const containerName = `dovu-app-paas-${app}`;
       const results: string[] = [];
 
@@ -163,8 +221,6 @@ export function registerTools(server: McpServer, cwd: string) {
       }
 
       // Remove image if known from state
-      const state = await readState(cwd);
-      const dep = state.deployments[app];
       if (dep?.image) {
         try {
           await provider.exec(`docker rmi ${dep.image}`);
@@ -204,6 +260,82 @@ export function registerTools(server: McpServer, cwd: string) {
   );
 
   server.tool(
+    "prewarm",
+    `Pre-provision a static site slot. Allocates a subdomain, writes a placeholder page, and makes the URL live immediately. Call this the moment the user declares intent to build a static site. A later deploy() call will swap in the real content.
+
+v1 supports framework: "static" only. Bun/Node warm containers come in Phase B.`,
+    {
+      name: z.string().describe("App name (slugified into subdomain)"),
+      framework: z.literal("static").describe("Runtime to warm. v1: only 'static' is supported"),
+      deployer: z.string().optional().describe("Optional deployer name (prefixes subdomain)"),
+    },
+    async ({ name, framework, deployer }) => {
+      const { config, error } = getConfigOrError();
+      if (error) return { content: [{ type: "text", text: error }] };
+
+      if (framework !== "static") {
+        return {
+          content: [{ type: "text", text: `Framework '${framework}' is not supported yet. v1 supports 'static' only.` }],
+          isError: true,
+        };
+      }
+
+      const provider = resolveProvider(config!);
+      const appName = slugify(name);
+      const deployerSlug = deployer ? slugify(deployer) : null;
+      const label = deployerSlug ? `${appName}-${deployerSlug}` : appName;
+
+      // Idempotent: return existing URL if slot/deployment exists
+      const state = await readState(cwd);
+      const existing = state.deployments[label];
+      if (existing) {
+        const url = provider.ssl
+          ? `https://${existing.domain}`
+          : `http://${existing.domain}`;
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ url, slot: label, placeholder: existing.status === "provisioned", existing: true, kind: existing.kind ?? "container" }, null, 2),
+          }],
+        };
+      }
+
+      const domain = `${label}.${provider.baseDomain}`;
+
+      try {
+        await provisionStaticSlot(provider, label);
+
+        const now = new Date().toISOString();
+        state.deployments[label] = {
+          name: label,
+          domain,
+          status: "provisioned",
+          kind: "static-slot",
+          currentRevision: "initial",
+          env: {},
+          createdAt: now,
+          updatedAt: now,
+        };
+        await writeState(cwd, state);
+
+        const url = provider.ssl ? `https://${domain}` : `http://${domain}`;
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ url, slot: label, placeholder: true, kind: "static-slot" }, null, 2),
+          }],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: "prewarm failed", message }, null, 2) }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
     "deploy",
     `Deploy a project to the configured droplet.
 
@@ -230,6 +362,54 @@ When using source, create the tar.gz from the project root: tar -czf project.tar
       if (error) return { content: [{ type: "text", text: error }] };
 
       const provider = resolveProvider(config!);
+
+      // --- Warm-slot fast path ---
+      if (name) {
+        const label = deployer
+          ? `${slugify(name)}-${slugify(deployer)}`
+          : slugify(name);
+        const state = await readState(cwd);
+        const slot = state.deployments[label];
+        if (slot?.kind === "static-slot") {
+          if (!source) {
+            return {
+              content: [{ type: "text", text: "Error: 'source' is required when deploying into a warm static slot" }],
+              isError: true,
+            };
+          }
+          try {
+            const { revision } = await deployStaticSlot(provider, label, source);
+            const now = new Date().toISOString();
+            slot.status = "running";
+            slot.currentRevision = revision;
+            slot.updatedAt = now;
+            await writeState(cwd, state);
+            const url = provider.ssl ? `https://${slot.domain}` : `http://${slot.domain}`;
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  url,
+                  appName: label,
+                  revision,
+                  steps: ["Validated", "Transferred", "Extracted", "Swapped"],
+                }, null, 2),
+              }],
+            };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({ error: "warm-slot deploy failed", message }, null, 2),
+              }],
+              isError: true,
+            };
+          }
+        }
+      }
+      // --- End warm-slot fast path. Falls through to existing container path. ---
+
       const steps: string[] = [];
       let stage = "setup";
 
