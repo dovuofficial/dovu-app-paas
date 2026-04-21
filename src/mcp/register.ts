@@ -6,6 +6,7 @@ import { readState, writeState, getNextPort } from "@/engine/state";
 import { inspectProject } from "@/engine/rules";
 import { buildImage, saveImage } from "@/engine/docker";
 import { generateNginxConfig } from "@/engine/nginx";
+import { provisionStaticSlot } from "@/engine/warm";
 import { readFile, rm, mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -200,6 +201,82 @@ export function registerTools(server: McpServer, cwd: string) {
       }
 
       return { content: [{ type: "text", text: `Destroyed '${app}':\n${results.map(r => `  - ${r}`).join("\n")}` }] };
+    }
+  );
+
+  server.tool(
+    "prewarm",
+    `Pre-provision a static site slot. Allocates a subdomain, writes a placeholder page, and makes the URL live immediately. Call this the moment the user declares intent to build a static site. A later deploy() call will swap in the real content.
+
+v1 supports framework: "static" only. Bun/Node warm containers come in Phase B.`,
+    {
+      name: z.string().describe("App name (slugified into subdomain)"),
+      framework: z.literal("static").describe("Runtime to warm. v1: only 'static' is supported"),
+      deployer: z.string().optional().describe("Optional deployer name (prefixes subdomain)"),
+    },
+    async ({ name, framework, deployer }) => {
+      const { config, error } = getConfigOrError();
+      if (error) return { content: [{ type: "text", text: error }] };
+
+      if (framework !== "static") {
+        return {
+          content: [{ type: "text", text: `Framework '${framework}' is not supported yet. v1 supports 'static' only.` }],
+          isError: true,
+        };
+      }
+
+      const provider = resolveProvider(config!);
+      const appName = slugify(name);
+      const deployerSlug = deployer ? slugify(deployer) : null;
+      const label = deployerSlug ? `${appName}-${deployerSlug}` : appName;
+
+      // Idempotent: return existing URL if slot/deployment exists
+      const state = await readState(cwd);
+      const existing = state.deployments[label];
+      if (existing) {
+        const url = provider.ssl
+          ? `https://${existing.domain}`
+          : `http://${existing.domain}`;
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ url, slot: label, placeholder: existing.status === "provisioned", existing: true }, null, 2),
+          }],
+        };
+      }
+
+      const domain = `${label}.${provider.baseDomain}`;
+
+      try {
+        await provisionStaticSlot(provider, label);
+
+        const now = new Date().toISOString();
+        state.deployments[label] = {
+          name: label,
+          domain,
+          status: "provisioned",
+          kind: "static-slot",
+          currentRevision: "initial",
+          env: {},
+          createdAt: now,
+          updatedAt: now,
+        };
+        await writeState(cwd, state);
+
+        const url = provider.ssl ? `https://${domain}` : `http://${domain}`;
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ url, slot: label, placeholder: true }, null, 2),
+          }],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: "prewarm failed", message }, null, 2) }],
+          isError: true,
+        };
+      }
     }
   );
 
