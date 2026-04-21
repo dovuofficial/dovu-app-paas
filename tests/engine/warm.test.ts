@@ -1,6 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import { generatePlaceholderHtml, generateStaticNginxConfig, provisionStaticSlot } from "@/engine/warm";
+import { generatePlaceholderHtml, generateStaticNginxConfig, provisionStaticSlot, deployStaticSlot } from "@/engine/warm";
 import type { Provider } from "@/providers/provider";
+import { $ } from "bun";
+import { mkdtemp, writeFile, rm, readFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 
 class FakeProvider implements Provider {
   readonly name = "fake";
@@ -110,5 +114,60 @@ describe("provisionStaticSlot", () => {
     expect(calls[3]).toContain("base64 -d");
     expect(calls[4]).toContain("nginx -s reload");
     expect(calls).toHaveLength(5);
+  });
+});
+
+async function makeCleanTarballBase64(): Promise<string> {
+  const stageDir = await mkdtemp(join(tmpdir(), "clean-stage-"));
+  await writeFile(join(stageDir, "index.html"), "<h1>real</h1>");
+  const tarPath = join(tmpdir(), `clean-${Date.now()}.tar.gz`);
+  await $`tar -czf ${tarPath} -C ${stageDir} .`.quiet();
+  const buf = await readFile(tarPath);
+  await rm(stageDir, { recursive: true, force: true });
+  await rm(tarPath, { force: true });
+  return buf.toString("base64");
+}
+
+describe("deployStaticSlot", () => {
+  test("validates, transfers, extracts, swaps symlink, cleans old revs", async () => {
+    const provider = new FakeProvider();
+    const b64 = await makeCleanTarballBase64();
+
+    const result = await deployStaticSlot(provider, "cat-blog", b64);
+
+    expect(provider.transferCalls).toHaveLength(1);
+    expect(provider.transferCalls[0].remote).toMatch(/^\/tmp\/cat-blog-rev-.*\.tar\.gz$/);
+
+    const calls = provider.execCalls;
+    // ordered: mkdir rev, tar extract, ln -sfn, rm tar, cleanup find
+    expect(calls[0]).toMatch(/mkdir -p \/opt\/deploy-ops\/sites\/cat-blog-rev-/);
+    expect(calls[1]).toMatch(/tar --no-same-owner --no-same-permissions -xzf .* -C \/opt\/deploy-ops\/sites\/cat-blog-rev-/);
+    expect(calls[2]).toMatch(/ln -sfn cat-blog-rev-.* \/opt\/deploy-ops\/sites\/cat-blog/);
+    expect(calls[3]).toMatch(/rm -rf \/tmp\/cat-blog-rev-.*\.tar\.gz/);
+    expect(calls[4]).toMatch(/find .*cat-blog-rev-/);
+    // no docker calls, no nginx reload
+    expect(calls.every((c) => !c.includes("docker"))).toBe(true);
+    expect(calls.every((c) => !c.includes("nginx -s reload"))).toBe(true);
+
+    expect(result.revision).toMatch(/^rev-/);
+  });
+
+  test("rejects malicious tarball before any target-side call", async () => {
+    const provider = new FakeProvider();
+
+    // Build a tar with path traversal. BSD tar (macOS default) uses
+    // `-s ',from,to,'` as the equivalent of GNU's `--transform=s,from,to,`.
+    // Verified to emit a literal "../evil.txt" entry on BSD tar 3.5.3.
+    const stageDir = await mkdtemp(join(tmpdir(), "evil-"));
+    await writeFile(join(stageDir, "a.txt"), "hi");
+    const tarPath = join(tmpdir(), `evil-${Date.now()}.tar.gz`);
+    await $`tar -czf ${tarPath} -C ${stageDir} -s ,a.txt,../evil.txt, a.txt`.quiet();
+    const b64 = (await readFile(tarPath)).toString("base64");
+    await rm(stageDir, { recursive: true, force: true });
+    await rm(tarPath, { force: true });
+
+    await expect(deployStaticSlot(provider, "cat-blog", b64)).rejects.toThrow(/\.\./);
+    expect(provider.transferCalls).toHaveLength(0);
+    expect(provider.execCalls).toHaveLength(0);
   });
 });

@@ -1,4 +1,7 @@
 import { $ } from "bun";
+import { writeFile, rm } from "fs/promises";
+import { join } from "path";
+import { tmpdir } from "os";
 import type { Provider } from "@/providers/provider";
 
 function escapeHtml(s: string): string {
@@ -188,4 +191,53 @@ export async function provisionStaticSlot(
   await provider.exec(`ln -sfn ${label}-initial ${symlinkPath}`);
   await provider.exec(pipeWrite(nginxConf, nginxConfPath));
   await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
+}
+
+export interface DeployStaticResult {
+  revision: string;
+}
+
+export async function deployStaticSlot(
+  provider: Provider,
+  label: string,
+  sourceB64: string
+): Promise<DeployStaticResult> {
+  // 1. Decode to local tmp
+  const ts = Date.now().toString(36);
+  const revision = `rev-${ts}`;
+  const localTar = join(tmpdir(), `${label}-${revision}.tar.gz`);
+  await writeFile(localTar, Buffer.from(sourceB64.replace(/\s/g, ""), "base64"));
+
+  try {
+    // 2. Validate before doing anything remote
+    await validateTarball(localTar);
+
+    const remoteTar = `/tmp/${label}-${revision}.tar.gz`;
+    const revDir = `${SITES_ROOT}/${label}-${revision}`;
+    const symlinkPath = `${SITES_ROOT}/${label}`;
+
+    // 3. Transfer
+    await provider.transferFile(localTar, remoteTar);
+
+    // 4. Extract on target
+    await provider.exec(`mkdir -p ${revDir}`);
+    await provider.exec(
+      `tar --no-same-owner --no-same-permissions -xzf ${remoteTar} -C ${revDir}`
+    );
+
+    // 5. Atomic symlink swap
+    await provider.exec(`ln -sfn ${label}-${revision} ${symlinkPath}`);
+
+    // 6. Remove the transferred tarball
+    await provider.exec(`rm -rf ${remoteTar}`);
+
+    // 7. Fire-and-forget cleanup of old revs (except the current one)
+    await provider.exec(
+      `find ${SITES_ROOT} -maxdepth 1 -type d -name '${label}-rev-*' ! -name '${label}-${revision}' -exec rm -rf {} + 2>/dev/null || true`
+    );
+
+    return { revision };
+  } finally {
+    await rm(localTar, { force: true });
+  }
 }
