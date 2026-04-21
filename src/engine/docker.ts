@@ -145,8 +145,21 @@ export async function buildImage(
   }
 
   try {
-    const args = ["docker", "build", ...(platform ? ["--platform", platform] : []), "-t", imageName, projectDir];
-    const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+    const cacheTag = `${imageName.split(":")[0]}:latest`;
+    const args = [
+      "docker", "build",
+      ...(platform ? ["--platform", platform] : []),
+      "--cache-from", cacheTag,
+      "--build-arg", "BUILDKIT_INLINE_CACHE=1",
+      "-t", imageName,
+      "-t", cacheTag,
+      projectDir,
+    ];
+    const proc = Bun.spawn(args, {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, DOCKER_BUILDKIT: "1" },
+    });
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
