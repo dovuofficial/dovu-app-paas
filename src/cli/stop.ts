@@ -27,7 +27,7 @@ export const stopCommand = new Command("stop")
     const containerName = `dovu-app-paas-${app}`;
 
     // Stop container
-    await provider.exec(`docker stop ${containerName}`);
+    await provider.exec(`docker stop -t 2 ${containerName}`);
     console.log(chalk.green("✓") + " Container stopped");
 
     // Disable nginx config (rename to .disabled)

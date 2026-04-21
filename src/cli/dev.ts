@@ -96,7 +96,7 @@ export const devCommand = new Command("dev")
 
       // Stop the deployed container inside the mini-droplet
       try {
-        await provider.exec(`docker stop dovu-app-paas-${appName}`);
+        await provider.exec(`docker stop -t 2 dovu-app-paas-${appName}`);
         console.log(chalk.yellow(`  Stopped deployed ${appName}`));
 
         if (existing) {

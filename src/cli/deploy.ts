@@ -108,7 +108,7 @@ export const deployCommand = new Command("deploy")
     const existing = state.deployments[appName];
     const containerName = `dovu-app-paas-${appName}`;
     try {
-      await provider.exec(`docker stop ${containerName}`);
+      await provider.exec(`docker stop -t 2 ${containerName}`);
       await provider.exec(`docker rm ${containerName}`);
       if (existing) console.log("Replacing existing deployment...");
     } catch {
