@@ -139,12 +139,13 @@ describe("deployStaticSlot", () => {
     expect(provider.transferCalls[0].remote).toMatch(/^\/opt\/deploy-ops\/sites\/\.staging-cat-blog-rev-.*\.tar\.gz$/);
 
     const calls = provider.execCalls;
-    // ordered: mkdir rev, tar extract, ln -sfn, rm tar, cleanup find
+    // ordered: mkdir rev, tar extract, chmod a+rX, ln -sfn, rm tar, cleanup find
     expect(calls[0]).toMatch(/mkdir -p \/opt\/deploy-ops\/sites\/cat-blog-rev-/);
     expect(calls[1]).toMatch(/tar --no-same-owner --no-same-permissions -xzf .* -C \/opt\/deploy-ops\/sites\/cat-blog-rev-/);
-    expect(calls[2]).toMatch(/ln -sfn cat-blog-rev-.* \/opt\/deploy-ops\/sites\/cat-blog/);
-    expect(calls[3]).toMatch(/rm -rf \/opt\/deploy-ops\/sites\/\.staging-cat-blog-rev-.*\.tar\.gz/);
-    expect(calls[4]).toMatch(/find .*cat-blog-rev-/);
+    expect(calls[2]).toMatch(/chmod -R a\+rX \/opt\/deploy-ops\/sites\/cat-blog-rev-/);
+    expect(calls[3]).toMatch(/ln -sfn cat-blog-rev-.* \/opt\/deploy-ops\/sites\/cat-blog/);
+    expect(calls[4]).toMatch(/rm -rf \/opt\/deploy-ops\/sites\/\.staging-cat-blog-rev-.*\.tar\.gz/);
+    expect(calls[5]).toMatch(/find .*cat-blog-rev-/);
     // no docker calls, no nginx reload
     expect(calls.every((c) => !c.includes("docker"))).toBe(true);
     expect(calls.every((c) => !c.includes("nginx -s reload"))).toBe(true);
