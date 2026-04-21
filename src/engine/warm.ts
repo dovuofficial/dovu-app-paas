@@ -225,6 +225,13 @@ export async function deployStaticSlot(
       `tar --no-same-owner --no-same-permissions -xzf ${remoteTar} -C ${revDir}`
     );
 
+    // 4b. Normalise permissions so nginx's www-data user can read.
+    // Tar's `./` root entry carries the staging dir's mode from the uploader —
+    // mkdtemp() commonly creates 0700 dirs, which tar then applies to revDir,
+    // locking out nginx. `chmod -R a+rX` adds read-for-all on files and
+    // execute-for-all on directories (X = execute only if dir or already-executable).
+    await provider.exec(`chmod -R a+rX ${revDir}`);
+
     // 5. Atomic symlink swap
     await provider.exec(`ln -sfn ${label}-${revision} ${symlinkPath}`);
 
