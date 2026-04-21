@@ -9,12 +9,22 @@
  * Buffers live in memory only, keyed by the deployment label. A 5-minute
  * inactivity TTL prevents leaks when an agent dies mid-upload, and a crude
  * MAX_BUFFERS cap stops a runaway client from exhausting memory.
+ *
+ * Diagnostics: each received chunk and the assembled payload are hashed
+ * (SHA-256, first 16 hex chars) and included in the receipt. This lets
+ * clients pinpoint wire corruption without reaching into server logs.
  */
+
+import { createHash } from "crypto";
 
 interface ChunkBuffer {
   chunks: Map<number, string>;
   total: number;
   lastActivity: number;
+}
+
+function sha16(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex").slice(0, 16);
 }
 
 const DEFAULT_BUFFER_TTL_MS = 5 * 60 * 1000;
@@ -46,6 +56,14 @@ export interface ChunkReceipt {
   total: number;
   complete: boolean;
   assembled?: string;
+  /** SHA-256 of this chunk's data (first 16 hex chars). Always set. */
+  chunkSha?: string;
+  /** Length of this chunk's data. Always set. */
+  chunkLen?: number;
+  /** SHA-256 of the full assembled payload, only on the final (complete) chunk. */
+  assembledSha?: string;
+  /** Length of the full assembled payload, only on the final (complete) chunk. */
+  assembledLen?: number;
 }
 
 export function receiveChunk(
@@ -77,8 +95,16 @@ export function receiveChunk(
   buf.chunks.set(index, data);
   buf.lastActivity = Date.now();
 
+  const chunkSha = sha16(data);
+  const chunkLen = data.length;
+
+  // Stderr log so operators can see every chunk as it lands on the server.
+  console.error(
+    `[chunks] key=${key} idx=${index}/${total - 1} len=${chunkLen} sha=${chunkSha}`,
+  );
+
   if (buf.chunks.size < total) {
-    return { received: buf.chunks.size, total, complete: false };
+    return { received: buf.chunks.size, total, complete: false, chunkSha, chunkLen };
   }
 
   const parts: string[] = [];
@@ -90,7 +116,22 @@ export function receiveChunk(
     parts.push(chunk);
   }
   buffers.delete(key);
-  return { received: total, total, complete: true, assembled: parts.join("") };
+  const assembled = parts.join("");
+  const assembledSha = sha16(assembled);
+  const assembledLen = assembled.length;
+  console.error(
+    `[chunks] key=${key} ASSEMBLED len=${assembledLen} sha=${assembledSha}`,
+  );
+  return {
+    received: total,
+    total,
+    complete: true,
+    assembled,
+    chunkSha,
+    chunkLen,
+    assembledSha,
+    assembledLen,
+  };
 }
 
 // Test-only helpers

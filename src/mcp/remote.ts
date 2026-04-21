@@ -88,14 +88,21 @@ async function handlePost(req: Request): Promise<Response> {
 
   const messages = Array.isArray(body) ? body : [body];
   if (!messages.some(isInitializeRequest)) {
+    // The client's session was probably invalidated — most commonly because
+    // the server restarted (sessions are in-memory), or the client's session
+    // ID was never recorded on this instance. Surface an actionable hint so
+    // the agent can tell the user how to recover instead of retrying blindly.
     return new Response(
       JSON.stringify({
         jsonrpc: "2.0",
         error: {
           code: -32000,
-          message: "Bad Request: No valid session ID provided",
+          message:
+            "Session expired or unknown. The MCP server likely restarted; your session ID is no longer tracked. " +
+            "Recovery: ask the user to run /mcp in Claude Code and reconnect deploy-ops. " +
+            "Do not retry this request blindly — it will keep failing until the session is re-initialised.",
         },
-        id: null,
+        id: messages[0]?.id ?? null,
       }),
       { status: 400, headers: { "Content-Type": "application/json" } }
     );
