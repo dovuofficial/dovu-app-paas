@@ -269,6 +269,38 @@ bun run dev stop my-app           # Stop (keeps container)
 bun run dev destroy my-app        # Full removal
 ```
 
+## Remote MCP server + `/upload` endpoint
+
+If you ran `scripts/provision-droplet.sh`, the droplet also hosts the remote MCP server at `https://mcp.<baseDomain>/mcp` behind bearer-token auth. The MCP server exposes two HTTPS routes:
+
+| Route | Purpose |
+|---|---|
+| `POST /mcp` | JSON-RPC tool calls (`prewarm`, `deploy`, `ls`, `status`, `logs`, `destroy`, `dev`) |
+| `POST /upload` | Raw-bytes upload of a project tarball — returns `{uploadId}` to reference from a subsequent `deploy` call. Preferred path for any non-trivial deploy; sub-second for any payload up to 10 MB. |
+| `GET /health` | Health probe |
+
+### nginx body size
+
+The `/upload` endpoint accepts tarballs up to 10 MB. The provisioner sets `client_max_body_size 12m;` in the generated `/etc/nginx/conf.d/deploy-ops-mcp.conf` to cover that plus HTTP overhead.
+
+If you're retrofitting an older droplet that pre-dates the `/upload` endpoint (provisioned before 2026-04-21), the nginx MCP config may still have the default 1 MB cap — uploads will 413 above that. Fix by adding the line:
+
+```nginx
+client_max_body_size 12m;
+```
+
+inside the MCP `server` block (alongside the `ssl_ciphers` line), then `nginx -t && systemctl reload nginx`.
+
+### Bearer token rotation
+
+```bash
+ssh root@your-droplet
+echo "TEAM_SECRET=$(openssl rand -hex 24)" > /etc/deploy-ops/env
+systemctl restart deploy-ops-mcp
+```
+
+Share the new token with your team. Each team member re-runs the `claude mcp add` onboarding command with the updated token.
+
 ## Resetting
 
 To remove all deployments from the droplet:
