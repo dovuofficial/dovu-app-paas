@@ -241,3 +241,16 @@ export async function deployStaticSlot(
     await rm(localTar, { force: true });
   }
 }
+
+export async function destroyStaticSlot(
+  provider: Provider,
+  label: string
+): Promise<void> {
+  await provider.exec(
+    `rm -rf ${SITES_ROOT}/${label} ${SITES_ROOT}/${label}-*`
+  );
+  await provider.exec(
+    `rm -f ${provider.nginxConfDir}/dovu-app-paas-${label}.conf`
+  );
+  await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
+}

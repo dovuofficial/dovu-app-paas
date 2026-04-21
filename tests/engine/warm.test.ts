@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { generatePlaceholderHtml, generateStaticNginxConfig, provisionStaticSlot, deployStaticSlot } from "@/engine/warm";
+import { generatePlaceholderHtml, generateStaticNginxConfig, provisionStaticSlot, deployStaticSlot, destroyStaticSlot } from "@/engine/warm";
 import type { Provider } from "@/providers/provider";
 import { $ } from "bun";
 import { mkdtemp, writeFile, rm, readFile } from "fs/promises";
@@ -169,5 +169,20 @@ describe("deployStaticSlot", () => {
     await expect(deployStaticSlot(provider, "cat-blog", b64)).rejects.toThrow(/\.\./);
     expect(provider.transferCalls).toHaveLength(0);
     expect(provider.execCalls).toHaveLength(0);
+  });
+});
+
+describe("destroyStaticSlot", () => {
+  test("removes symlink, all rev dirs, initial dir, and nginx conf, then reloads", async () => {
+    const provider = new FakeProvider();
+    await destroyStaticSlot(provider, "cat-blog");
+
+    const joined = provider.execCalls.join("\n");
+    expect(joined).toContain("rm -rf /opt/deploy-ops/sites/cat-blog");
+    expect(joined).toContain("cat-blog-*");  // glob removes -initial + all -rev-*
+    expect(joined).toContain("rm -f /etc/nginx/conf.d/dovu-app-paas-cat-blog.conf");
+    expect(joined).toContain("nginx");
+    // no docker calls
+    expect(provider.execCalls.every((c) => !c.includes("docker"))).toBe(true);
   });
 });
