@@ -44,6 +44,16 @@ export function registerTools(server: McpServer, cwd: string) {
     // Reconcile live status
     const provider = resolveProvider(config!);
     for (const dep of Object.values(deployments)) {
+      if (dep.kind === "static-slot") {
+        try {
+          // symlink resolves to an existing directory?
+          await provider.exec(`test -d /opt/deploy-ops/sites/${dep.name}`);
+          dep.status = dep.currentRevision === "initial" ? "provisioned" : "running";
+        } catch {
+          dep.status = "stopped";
+        }
+        continue;
+      }
       try {
         const running = await provider.exec(`docker inspect -f '{{.State.Running}}' dovu-app-paas-${dep.name}`);
         dep.status = running.trim() === "true" ? "running" : "stopped";
@@ -73,6 +83,24 @@ export function registerTools(server: McpServer, cwd: string) {
           ? `Available apps: ${available.join(", ")}`
           : "No deployments found.";
         return { content: [{ type: "text", text: `Deployment '${app}' not found. ${hint}` }] };
+      }
+
+      if (dep.kind === "static-slot") {
+        const provider = resolveProvider(config!);
+        let alive = false;
+        try {
+          await provider.exec(`test -d /opt/deploy-ops/sites/${app}`);
+          alive = true;
+        } catch {}
+        const result = {
+          name: dep.name,
+          domain: dep.domain,
+          running: alive,
+          kind: "static-slot" as const,
+          currentRevision: dep.currentRevision ?? null,
+          warnings: [] as string[],
+        };
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       const provider = resolveProvider(config!);
@@ -128,6 +156,15 @@ export function registerTools(server: McpServer, cwd: string) {
           ? `Available apps: ${available.join(", ")}`
           : "No deployments found.";
         return { content: [{ type: "text", text: `Deployment '${app}' not found. ${hint}` }] };
+      }
+
+      if (state.deployments[app].kind === "static-slot") {
+        return {
+          content: [{
+            type: "text",
+            text: "Static sites have no container logs. Check nginx access logs on the droplet at /var/log/nginx/access.log.",
+          }],
+        };
       }
 
       const provider = resolveProvider(config!);

@@ -35,7 +35,7 @@ export function formatDeploymentList(
     name: dep.name,
     domain: dep.domain,
     status: dep.status,
-    containerId: dep.containerId,
+    containerId: dep.containerId ?? "—",
   }));
 }
 

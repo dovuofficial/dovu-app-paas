@@ -72,3 +72,24 @@ describe("formatStatus", () => {
     expect(result.cpu).toBeNull();
   });
 });
+
+describe("formatDeploymentList — static-slot", () => {
+  test("reports static slot status and omits containerId", () => {
+    const result = formatDeploymentList({
+      "site": {
+        name: "site",
+        domain: "site.apps.test",
+        status: "running",
+        kind: "static-slot",
+        currentRevision: "rev-abc",
+        env: {},
+        createdAt: "2026-04-20T00:00:00Z",
+        updatedAt: "2026-04-20T00:00:00Z",
+      },
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe("site");
+    expect(result[0].status).toBe("running");
+    expect(result[0].containerId).toBe("—"); // or empty string, whichever formatter chooses
+  });
+});
