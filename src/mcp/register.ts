@@ -340,6 +340,29 @@ v1 supports framework: "static" only. Bun/Node warm containers come in Phase B.`
     "deploy",
     `Deploy a project to the configured droplet.
 
+=== PICK THE RIGHT PATH FIRST ===
+
+**Pure HTML / CSS / JS (no server runtime)** — Astro build output, Vite
+static output, hand-written index.html, any dist/ folder with no process
+to run. This is the WARM-SLOT path:
+  1. Call \`prewarm({ name, framework: "static" })\` FIRST. Returns a
+     live URL with a placeholder in ~200 ms.
+  2. Build the static content locally. Do NOT wrap it in a Bun/Node
+     file server — nginx serves the files directly. No package.json,
+     no Bun.serve(), no Dockerfile needed for static content.
+  3. Tar+gzip+base64 the built output, then call deploy() with chunks
+     (see UPLOAD section below). The URL updates atomically.
+
+**Everything else (dynamic runtime)** — Bun server, Node/Express, Next.js,
+Laravel, or a project with a custom Dockerfile. This is the CONTAINER
+path:
+  - No prewarm needed.
+  - Just call deploy() with chunks; the server builds a Docker image,
+    starts a container on port 3000, and wires nginx.
+
+If you find yourself about to write a tiny Bun server just to serve
+HTML files, STOP — use the static path instead.
+
 === HOW TO UPLOAD SOURCE ===
 
 Default and required path for any non-trivial project: **chunk uploads**.
@@ -355,19 +378,20 @@ agents emit long tool arguments one token at a time, which is slow and
 unreliable. Keep each chunk ≤4096 chars (~2048 recommended).
 
 Typical flow for a ~10KB static site:
-  1. Build locally, tar.gz it, base64-encode, assume N bytes total.
-  2. Split into ceil(N / 2048) chunks.
-  3. For i in 0..N-1: deploy({ name, chunk: { index: i, total: N, data: chunks[i] } }).
-  4. Last call returns { url, revision, steps: [...] }.
+  1. prewarm({ name, framework: "static" })  — URL live, placeholder served.
+  2. Build locally, tar.gz it, base64-encode, assume N bytes total.
+  3. Split into ceil(N / 2048) chunks.
+  4. For i in 0..N-1: deploy({ name, chunk: { index: i, total: N, data: chunks[i] } }).
+  5. Last call returns { url, revision, steps: [...] }.
 
-=== APPLICATION REQUIREMENTS ===
+=== CONTAINER-PATH REQUIREMENTS (dynamic apps only) ===
 
 IMPORTANT: The application MUST listen on port 3000. The platform's reverse proxy forwards all traffic to this port inside the container.
 
-Recommended project structures:
-- Bun server: index.ts with Bun.serve({ port: 3000 }). Best for APIs and dynamic apps.
-- Astro/Vite/static: Build locally, include a Bun file server (index.ts) that serves the dist/ folder on port 3000. Astro is recommended for web/frontend deployments.
+Recommended project structures for dynamic apps:
+- Bun server: index.ts with Bun.serve({ port: 3000 }). Best for APIs.
 - Next.js: Detected automatically. Set output: "standalone" in next.config.
+- Laravel: artisan present → PHP runtime auto-detected.
 - Custom Dockerfile: If a Dockerfile is present, it will be used. Ensure it EXPOSEs port 3000.
 
 When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
