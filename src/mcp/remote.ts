@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { registerTools } from "./register";
 import { SERVER_INSTRUCTIONS } from "./instructions";
+import { storeUpload, gcUploads, UPLOAD_MAX_BYTES } from "./uploads";
 
 const PORT = parseInt(process.env.MCP_PORT || "8888", 10);
 const TEAM_SECRET = process.env.TEAM_SECRET;
@@ -46,6 +47,37 @@ Bun.serve({
       });
     }
 
+    // Raw-bytes upload endpoint. Agents POST a tarball here (any
+    // Content-Type, bytes in the body), receive {uploadId}, and reference
+    // that uploadId from a subsequent `deploy` tool call. This avoids
+    // streaming bytes through the LLM's tool-call emission path — the
+    // slowdown that makes chunked upload painful for any real payload.
+    if (url.pathname === "/upload") {
+      const authError = checkAuth(req);
+      if (authError) return authError;
+      if (req.method !== "POST") {
+        return new Response(
+          JSON.stringify({ error: "Method not allowed" }),
+          { status: 405, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      try {
+        const body = await req.arrayBuffer();
+        const bytes = new Uint8Array(body);
+        const uploadId = await storeUpload(bytes);
+        return new Response(
+          JSON.stringify({ uploadId, size: bytes.byteLength }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return new Response(
+          JSON.stringify({ error: message, limit: UPLOAD_MAX_BYTES }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+    }
+
     // All /mcp routes require auth
     if (url.pathname === "/mcp") {
       const authError = checkAuth(req);
@@ -61,6 +93,16 @@ Bun.serve({
     return new Response("Not found", { status: 404 });
   },
 });
+
+// Periodic upload garbage collection — reaps files older than UPLOAD_TTL_MS.
+// Cheap: a single readdir + stat/unlink loop over /tmp/mcp-uploads.
+gcUploads().catch(() => {});
+setInterval(
+  () => {
+    gcUploads().catch(() => {});
+  },
+  5 * 60 * 1000,
+);
 
 async function handlePost(req: Request): Promise<Response> {
   const sessionId = req.headers.get("mcp-session-id");

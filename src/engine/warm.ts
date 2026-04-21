@@ -206,7 +206,7 @@ export interface DeployStaticResult {
 export async function deployStaticSlot(
   provider: Provider,
   label: string,
-  sourceB64: string
+  payload: string | Buffer | Uint8Array,
 ): Promise<DeployStaticResult> {
   const timings: StepTiming[] = [];
   const step = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
@@ -218,12 +218,20 @@ export async function deployStaticSlot(
     }
   };
 
-  // 1. Decode to local tmp
+  // 1. Materialise the tarball to a local tmp file. Accept either a base64
+  // string (from the `source` or `chunk` paths) or raw bytes (from `uploadId`,
+  // which bypasses the LLM's tool-call emission path).
   const ts = Date.now().toString(36);
   const revision = `rev-${ts}`;
   const localTar = join(tmpdir(), `${label}-${revision}.tar.gz`);
   await step("decode", async () => {
-    await writeFile(localTar, Buffer.from(sourceB64.replace(/\s/g, ""), "base64"));
+    const bytes =
+      typeof payload === "string"
+        ? Buffer.from(payload.replace(/\s/g, ""), "base64")
+        : Buffer.isBuffer(payload)
+          ? payload
+          : Buffer.from(payload);
+    await writeFile(localTar, bytes);
   });
 
   try {
