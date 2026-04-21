@@ -8,6 +8,7 @@ import { buildImage, saveImage } from "@/engine/docker";
 import { generateNginxConfig } from "@/engine/nginx";
 import { provisionStaticSlot, deployStaticSlot, destroyStaticSlot } from "@/engine/warm";
 import { receiveChunk } from "./chunks";
+import { consumeUpload } from "./uploads";
 import { readFile, rm, mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -413,24 +414,33 @@ HTML files, STOP — use the static path instead.
 
 === HOW TO UPLOAD SOURCE ===
 
-Default and required path for any non-trivial project: **chunk uploads**.
-Pass chunk: { index, total, data } with a portion of the base64 string.
-Call deploy() repeatedly — once per chunk — with the same \`name\`.
-Non-final calls return { received, total, complete: false }; the final
-call assembles the full payload and runs the actual deploy.
+**FASTEST path (required for any non-trivial payload): out-of-band upload**.
+Use the MCP server's /upload HTTP endpoint to POST the raw tarball bytes in
+a single request from Bash, then pass the returned uploadId into deploy().
+This bypasses the LLM's tool-call emission entirely — uploads finish in
+a few hundred milliseconds regardless of payload size (up to 10MB).
 
-Do NOT try to pass the full base64 via 'source'. Source is hard-capped
-at 8192 bytes (post-encode); anything larger is REJECTED with an error
-naming the chunk path. Even under 8KB, chunks are preferred — LLM
-agents emit long tool arguments one token at a time, which is slow and
-unreliable. Keep each chunk ≤4096 chars (~2048 recommended).
+Bash flow:
+  curl -X POST https://<mcp-host>/upload \\
+    -H "Authorization: Bearer <TOKEN>" \\
+    --data-binary @project.tar.gz
+  # → {"uploadId":"upl_...","size":12345}
 
-Typical flow for a ~10KB static site:
-  1. prewarm({ name, framework: "static" })  — URL live, placeholder served.
-  2. Build locally, tar.gz it, base64-encode, assume N bytes total.
-  3. Split into ceil(N / 2048) chunks.
-  4. For i in 0..N-1: deploy({ name, chunk: { index: i, total: N, data: chunks[i] } }).
-  5. Last call returns { url, revision, steps: [...] }.
+Then one tool call (tiny argument, instant to emit):
+  deploy({ name, uploadId: "upl_..." })
+
+Fallbacks when the upload endpoint isn't reachable (e.g., stdio-only MCP):
+- **chunk**: multi-part upload of the base64 string via many small tool
+  calls (~2KB each). See the 'chunk' parameter docs. Slower than uploadId
+  — the LLM still has to emit every chunk token-by-token.
+- **source**: single base64 string, hard-capped at 8192 bytes. Rejected
+  with instructions above that size.
+
+Typical flow for a static site:
+  1. prewarm({ name, framework: "static" })  — URL live with placeholder.
+  2. Build locally → tar -czf site.tar.gz -C build .
+  3. curl -X POST .../upload -H "Authorization: Bearer \$TOKEN" --data-binary @site.tar.gz
+  4. deploy({ name, uploadId: <id from step 3> })  → live URL updates.
 
 === CONTAINER-PATH REQUIREMENTS (dynamic apps only) ===
 
@@ -444,23 +454,50 @@ Recommended project structures for dynamic apps:
 
 When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
     {
-      name: z.string().optional().describe("App name (required when providing source or chunk). Must be consistent across all chunks for one upload."),
+      name: z.string().optional().describe("App name (required when providing source, chunk, or uploadId). Must be consistent across all chunks for one upload."),
       domain: z.string().optional().describe("Override domain"),
       env: z.record(z.string(), z.string()).optional().describe("Environment variables as key-value pairs"),
       deployer: z.string().optional().describe("Name of the person deploying (used in subdomain, e.g. 'alice'). Must be consistent across all chunks."),
-      source: z.string().optional().describe("FALLBACK ONLY for payloads ≤8KB. Base64-encoded tar.gz. Rejected with instructions if over 8192 bytes — use 'chunk' instead for anything larger, and preferred even under the limit. See the top of the tool description."),
+      uploadId: z.string().optional().describe("FASTEST upload path. ID returned by a prior POST to the MCP server's /upload endpoint — the agent curls the tarball bytes there, gets back an uploadId, and references it here. Bypasses the tool-call emission path entirely; sub-second for any payload up to 10MB. Use this for anything non-trivial."),
+      source: z.string().optional().describe("FALLBACK for tiny payloads ≤8KB. Base64-encoded tar.gz. Rejected with instructions if over 8192 bytes. Prefer uploadId or chunk for anything larger."),
       chunk: z.object({
         index: z.number().int().min(0).describe("Zero-based chunk index"),
         total: z.number().int().min(1).max(1000).describe("Total number of chunks (1-1000)"),
         data: z.string().describe("This chunk's slice of the full base64-encoded tar.gz. Max 4096 chars (server enforces); ~2048 recommended."),
         sha256Full: z.string().length(16).optional().describe("Optional integrity check on the final chunk: first 16 hex chars of SHA-256 over the FULL concatenated base64 payload (not this chunk alone). If provided on the final chunk, the server compares it to its own hash of the assembled payload and rejects on mismatch. Use this to catch wire corruption."),
-      }).optional().describe("PREFERRED upload path. Multi-part chunked upload — each call carries one slice of the base64. Buffered server-side, keyed by app name. The final chunk triggers the real deploy and returns the URL. Each chunk response includes { chunkSha, chunkLen } so the client can verify what the server received."),
+      }).optional().describe("FALLBACK upload path when /upload isn't available (e.g. stdio-only MCP). Multi-part chunked upload — each call carries one slice of the base64. Slower than uploadId because the LLM still emits every chunk token-by-token. The final chunk triggers the real deploy."),
     },
-    async ({ name, domain, env: envInput, deployer, source, chunk }) => {
+    async ({ name, domain, env: envInput, deployer, source, chunk, uploadId }) => {
       const { config, error } = getConfigOrError();
       if (error) return { content: [{ type: "text", text: error }] };
 
       const provider = resolveProvider(config!);
+
+      // Unified tarball payload — populated by uploadId (raw bytes),
+      // source (base64 string), or chunk assembly (base64 string). The
+      // warm-slot engine accepts either and handles decoding internally.
+      let payload: string | Buffer | undefined = source;
+
+      // --- uploadId: retrieve pre-uploaded bytes ---
+      // The agent POSTed raw bytes to /upload (via curl in Bash, bypassing
+      // the slow LLM tool-call emission path) and passed the returned ID here.
+      if (uploadId) {
+        const bytes = await consumeUpload(uploadId);
+        if (!bytes) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                error: "unknown or expired uploadId",
+                uploadId,
+                action: "Re-run POST /upload to get a fresh uploadId, then retry. Uploads expire after 15 minutes and are consumed on first use.",
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
+        payload = bytes;
+      }
 
       // --- Upload size enforcement ---
       // Agents default to 'source' out of habit but emit long tool arguments
@@ -546,10 +583,9 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
               isError: true,
             };
           }
-          // Complete — substitute the assembled payload into `source` and
-          // let the rest of the handler run as if a single `source` had been
-          // passed in the first place.
-          source = receipt.assembled;
+          // Complete — substitute the assembled payload for downstream use.
+          payload = receipt.assembled;
+          source = receipt.assembled; // legacy: container path below still reads `source` directly
         } catch (err) {
           return {
             content: [{
@@ -570,15 +606,18 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
         const state = await readState(cwd);
         const slot = state.deployments[label];
         if (slot?.kind === "static-slot") {
-          if (!source) {
+          if (!payload) {
             return {
-              content: [{ type: "text", text: "Error: 'source' is required when deploying into a warm static slot" }],
+              content: [{
+                type: "text",
+                text: "Error: provide one of `uploadId`, `source`, or a `chunk` upload when deploying into a warm static slot",
+              }],
               isError: true,
             };
           }
           try {
             const deployT0 = performance.now();
-            const { revision, timings } = await deployStaticSlot(provider, label, source);
+            const { revision, timings } = await deployStaticSlot(provider, label, payload);
             const totalMs = Math.round(performance.now() - deployT0);
             const now = new Date().toISOString();
             slot.status = "running";
@@ -618,14 +657,15 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
       try {
         // Determine project directory
         let projectDir = cwd;
-        if (source) {
+        if (payload) {
           if (!name) {
-            return { content: [{ type: "text", text: "Error: 'name' is required when deploying with 'source'" }] };
+            return { content: [{ type: "text", text: "Error: 'name' is required when deploying with source/chunk/uploadId" }] };
           }
           stage = "unpack_source";
           projectDir = join(cwd, name);
           await mkdir(projectDir, { recursive: true });
-          const tarball = Buffer.from(source, "base64");
+          const tarball =
+            typeof payload === "string" ? Buffer.from(payload, "base64") : Buffer.from(payload);
           const tarPath = join(tmpdir(), `deploy-${name}-${Date.now()}.tar.gz`);
           await writeFile(tarPath, tarball);
           await $`tar -xzf ${tarPath} -C ${projectDir}`.quiet();

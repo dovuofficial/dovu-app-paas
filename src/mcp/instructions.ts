@@ -35,14 +35,25 @@ For: Bun servers, Node/Express, Next.js, Laravel, APIs, apps with a custom Docke
 ========================================
 UPLOAD CONTRACT (both paths)
 ========================================
-The 'source' parameter is a FALLBACK, hard-capped at 8KB of base64, and rejected with instructions above that threshold. Do not try to send a full base64 payload as 'source'.
+**FASTEST path: out-of-band upload via /upload.**
 
-The correct path is the 'chunk' parameter:
-  deploy({ name, chunk: { index, total, data: <~2KB of base64> } })
+The remote MCP server exposes a POST /upload endpoint. The agent uses Bash (curl) to send the raw tarball bytes in a single HTTP request — bypassing the LLM's tool-call emission path entirely. This is the preferred path for anything non-trivial:
 
-Call deploy() once per chunk with the same 'name'. Non-final calls return { received, total, complete: false }. The final chunk assembles the payload and triggers the real deploy, returning the live URL.
+  curl -X POST https://<mcp-host>/upload \\
+    -H "Authorization: Bearer <TOKEN>" \\
+    --data-binary @project.tar.gz
+  # → {"uploadId":"upl_...","size":12345}
 
-LLM agents emit long tool arguments one token at a time. Many small chunks take seconds; one big 'source' can take minutes and fail.
+Then one tiny tool call:
+  deploy({ name, uploadId: "upl_..." })
+
+This finishes in a few hundred ms regardless of payload size (up to 10MB). Use this for every real deploy unless the upload endpoint is unreachable.
+
+FALLBACKS (slower — LLM emits base64 token-by-token):
+- 'chunk': multi-part base64 upload via many small tool calls (~2KB each). Use when /upload isn't reachable.
+- 'source': single base64 string, hard-capped at 8KB. Only for trivial payloads.
+
+Do not pass more than 8KB of base64 via 'source' — the server rejects with instructions above that threshold.
 
 ========================================
 OTHER TOOLS
