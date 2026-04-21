@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { registerTools } from "./register";
+import { SERVER_INSTRUCTIONS } from "./instructions";
 
 const PORT = parseInt(process.env.MCP_PORT || "8888", 10);
 const TEAM_SECRET = process.env.TEAM_SECRET;
@@ -113,10 +114,15 @@ async function handlePost(req: Request): Promise<Response> {
     if (sid) sessions.delete(sid);
   };
 
-  const server = new McpServer({
-    name: "deploy-ops",
-    version: "0.1.0",
-  });
+  const server = new McpServer(
+    {
+      name: "deploy-ops",
+      version: "0.1.0",
+    },
+    {
+      instructions: SERVER_INSTRUCTIONS,
+    },
+  );
 
   registerTools(server, WORKSPACE);
   await server.connect(transport);
