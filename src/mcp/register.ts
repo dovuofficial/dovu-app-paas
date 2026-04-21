@@ -6,7 +6,7 @@ import { readState, writeState, getNextPort } from "@/engine/state";
 import { inspectProject } from "@/engine/rules";
 import { buildImage, saveImage } from "@/engine/docker";
 import { generateNginxConfig } from "@/engine/nginx";
-import { provisionStaticSlot } from "@/engine/warm";
+import { provisionStaticSlot, deployStaticSlot } from "@/engine/warm";
 import { readFile, rm, mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -307,6 +307,54 @@ When using source, create the tar.gz from the project root: tar -czf project.tar
       if (error) return { content: [{ type: "text", text: error }] };
 
       const provider = resolveProvider(config!);
+
+      // --- Warm-slot fast path ---
+      if (name) {
+        const label = deployer
+          ? `${slugify(name)}-${slugify(deployer)}`
+          : slugify(name);
+        const state = await readState(cwd);
+        const slot = state.deployments[label];
+        if (slot?.kind === "static-slot") {
+          if (!source) {
+            return {
+              content: [{ type: "text", text: "Error: 'source' is required when deploying into a warm static slot" }],
+              isError: true,
+            };
+          }
+          try {
+            const { revision } = await deployStaticSlot(provider, label, source);
+            const now = new Date().toISOString();
+            slot.status = "running";
+            slot.currentRevision = revision;
+            slot.updatedAt = now;
+            await writeState(cwd, state);
+            const url = provider.ssl ? `https://${slot.domain}` : `http://${slot.domain}`;
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  url,
+                  appName: label,
+                  revision,
+                  steps: ["Validated", "Transferred", "Extracted", "Swapped"],
+                }, null, 2),
+              }],
+            };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({ error: "warm-slot deploy failed", message }, null, 2),
+              }],
+              isError: true,
+            };
+          }
+        }
+      }
+      // --- End warm-slot fast path. Falls through to existing container path. ---
+
       const steps: string[] = [];
       let stage = "setup";
 
