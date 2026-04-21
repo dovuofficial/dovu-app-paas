@@ -1,4 +1,5 @@
 import { $ } from "bun";
+import type { Provider } from "@/providers/provider";
 
 function escapeHtml(s: string): string {
   return s
@@ -157,4 +158,34 @@ export async function validateTarball(localPath: string): Promise<void> {
       );
     }
   }
+}
+
+const SITES_ROOT = "/opt/deploy-ops/sites";
+
+function pipeWrite(contents: string, remotePath: string): string {
+  const b64 = Buffer.from(contents).toString("base64");
+  return `echo '${b64}' | base64 -d > ${remotePath}`;
+}
+
+export async function provisionStaticSlot(
+  provider: Provider,
+  label: string
+): Promise<void> {
+  const initialDir = `${SITES_ROOT}/${label}-initial`;
+  const symlinkPath = `${SITES_ROOT}/${label}`;
+  const nginxConfPath = `${provider.nginxConfDir}/dovu-app-paas-${label}.conf`;
+
+  const serverName = `${label}.${provider.baseDomain}`;
+  const placeholder = generatePlaceholderHtml(label);
+  const nginxConf = generateStaticNginxConfig({
+    serverName,
+    sitePath: symlinkPath,
+    ssl: provider.ssl ?? undefined,
+  });
+
+  await provider.exec(`mkdir -p ${initialDir}`);
+  await provider.exec(pipeWrite(placeholder, `${initialDir}/index.html`));
+  await provider.exec(`ln -sfn ${label}-initial ${symlinkPath}`);
+  await provider.exec(pipeWrite(nginxConf, nginxConfPath));
+  await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
 }

@@ -1,5 +1,27 @@
 import { describe, test, expect } from "bun:test";
-import { generatePlaceholderHtml, generateStaticNginxConfig } from "@/engine/warm";
+import { generatePlaceholderHtml, generateStaticNginxConfig, provisionStaticSlot } from "@/engine/warm";
+import type { Provider } from "@/providers/provider";
+
+class FakeProvider implements Provider {
+  readonly name = "fake";
+  readonly baseDomain = "apps.test";
+  readonly nginxConfDir = "/etc/nginx/conf.d";
+  readonly ssl = { certPath: "/ssl/cert.pem", keyPath: "/ssl/key.pem" };
+
+  execCalls: string[] = [];
+  transferCalls: Array<{ local: string; remote: string }> = [];
+
+  async setup() {}
+  async teardown() {}
+  async transferImage() {}
+  async transferFile(local: string, remote: string) {
+    this.transferCalls.push({ local, remote });
+  }
+  async exec(command: string): Promise<string> {
+    this.execCalls.push(command);
+    return "";
+  }
+}
 
 describe("generatePlaceholderHtml", () => {
   test("includes the slot name in the page", () => {
@@ -70,5 +92,23 @@ describe("generateStaticNginxConfig", () => {
     });
     // regex literal may be escaped differently across formatters; just assert the shape
     expect(cfg).toMatch(/location ~ \/\\\.\s*\{[^}]*deny all;/);
+  });
+});
+
+describe("provisionStaticSlot", () => {
+  test("runs mkdir, writes placeholder, creates symlink, writes nginx conf, reloads", async () => {
+    const provider = new FakeProvider();
+    await provisionStaticSlot(provider, "cat-blog");
+
+    const calls = provider.execCalls;
+    // Expected order: mkdir -initial, write placeholder, ln -sfn, write nginx conf, nginx reload
+    expect(calls[0]).toContain("mkdir -p /opt/deploy-ops/sites/cat-blog-initial");
+    expect(calls[1]).toContain("cat-blog-initial/index.html");
+    expect(calls[1]).toContain("base64 -d"); // placeholder written via base64 pipe
+    expect(calls[2]).toContain("ln -sfn cat-blog-initial /opt/deploy-ops/sites/cat-blog");
+    expect(calls[3]).toContain("/etc/nginx/conf.d/dovu-app-paas-cat-blog.conf");
+    expect(calls[3]).toContain("base64 -d");
+    expect(calls[4]).toContain("nginx -s reload");
+    expect(calls).toHaveLength(5);
   });
 });
