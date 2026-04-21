@@ -340,7 +340,27 @@ v1 supports framework: "static" only. Bun/Node warm containers come in Phase B.`
     "deploy",
     `Deploy a project to the configured droplet.
 
-Provide source as a base64-encoded tar.gz to deploy code remotely, or omit to deploy from the local working directory.
+=== HOW TO UPLOAD SOURCE ===
+
+Default and required path for any non-trivial project: **chunk uploads**.
+Pass chunk: { index, total, data } with a portion of the base64 string.
+Call deploy() repeatedly — once per chunk — with the same \`name\`.
+Non-final calls return { received, total, complete: false }; the final
+call assembles the full payload and runs the actual deploy.
+
+Do NOT try to pass the full base64 via 'source'. Source is hard-capped
+at 8192 bytes (post-encode); anything larger is REJECTED with an error
+naming the chunk path. Even under 8KB, chunks are preferred — LLM
+agents emit long tool arguments one token at a time, which is slow and
+unreliable. Keep each chunk ≤4096 chars (~2048 recommended).
+
+Typical flow for a ~10KB static site:
+  1. Build locally, tar.gz it, base64-encode, assume N bytes total.
+  2. Split into ceil(N / 2048) chunks.
+  3. For i in 0..N-1: deploy({ name, chunk: { index: i, total: N, data: chunks[i] } }).
+  4. Last call returns { url, revision, steps: [...] }.
+
+=== APPLICATION REQUIREMENTS ===
 
 IMPORTANT: The application MUST listen on port 3000. The platform's reverse proxy forwards all traffic to this port inside the container.
 
@@ -350,26 +370,58 @@ Recommended project structures:
 - Next.js: Detected automatically. Set output: "standalone" in next.config.
 - Custom Dockerfile: If a Dockerfile is present, it will be used. Ensure it EXPOSEs port 3000.
 
-When using source, create the tar.gz from the project root: tar -czf project.tar.gz -C /path/to/project .
-
-For large source payloads, use chunk uploads instead of a single 'source' parameter. Pass chunk: { index, total, data } with a portion of the base64 string (≤2KB per chunk recommended). Each non-final chunk returns { received, total, complete: false }. Send the final chunk to trigger the actual deploy. Chunk buffers are keyed by the resolved app name, so name + deployer must stay consistent across chunks.`,
+When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
     {
-      name: z.string().optional().describe("App name (required when providing source or chunk)"),
+      name: z.string().optional().describe("App name (required when providing source or chunk). Must be consistent across all chunks for one upload."),
       domain: z.string().optional().describe("Override domain"),
       env: z.record(z.string(), z.string()).optional().describe("Environment variables as key-value pairs"),
-      deployer: z.string().optional().describe("Name of the person deploying (used in subdomain, e.g. 'alice')"),
-      source: z.string().optional().describe("Base64-encoded tar.gz of the project source code. When provided, the project is unpacked and deployed on the server. For payloads over a few KB, prefer 'chunk' instead — agents stream large tool arguments slowly."),
+      deployer: z.string().optional().describe("Name of the person deploying (used in subdomain, e.g. 'alice'). Must be consistent across all chunks."),
+      source: z.string().optional().describe("FALLBACK ONLY for payloads ≤8KB. Base64-encoded tar.gz. Rejected with instructions if over 8192 bytes — use 'chunk' instead for anything larger, and preferred even under the limit. See the top of the tool description."),
       chunk: z.object({
         index: z.number().int().min(0).describe("Zero-based chunk index"),
         total: z.number().int().min(1).max(1000).describe("Total number of chunks (1-1000)"),
-        data: z.string().describe("This chunk's portion of the full base64-encoded tar.gz"),
-      }).optional().describe("Multi-part upload chunk. Buffered server-side keyed by app name; when all chunks arrive, the full source is assembled and the deploy runs. Use this instead of 'source' for payloads >~4KB."),
+        data: z.string().describe("This chunk's slice of the full base64-encoded tar.gz. Max 4096 chars (server enforces); ~2048 recommended."),
+      }).optional().describe("PREFERRED upload path. Multi-part chunked upload — each call carries one slice of the base64. Buffered server-side, keyed by app name. The final chunk triggers the real deploy and returns the URL."),
     },
     async ({ name, domain, env: envInput, deployer, source, chunk }) => {
       const { config, error } = getConfigOrError();
       if (error) return { content: [{ type: "text", text: error }] };
 
       const provider = resolveProvider(config!);
+
+      // --- Upload size enforcement ---
+      // Agents default to 'source' out of habit but emit long tool arguments
+      // very slowly (token-by-token). Reject oversized 'source' with guidance.
+      const SOURCE_MAX = 8192;
+      const CHUNK_MAX = 4096;
+      if (source && source.length > SOURCE_MAX) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: "source payload too large",
+              size: source.length,
+              limit: SOURCE_MAX,
+              action: "Use 'chunk' instead. Split the base64 string into pieces of ≤2048 chars. For each piece, call deploy({name, chunk: {index, total, data: piece}}). The final chunk triggers the deploy automatically.",
+            }, null, 2),
+          }],
+          isError: true,
+        };
+      }
+      if (chunk && chunk.data.length > CHUNK_MAX) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              error: "chunk data too large",
+              size: chunk.data.length,
+              limit: CHUNK_MAX,
+              action: "Reduce chunk size to ≤4096 chars (≤2048 recommended). Increase 'total' and redistribute. Chunk buffers are keyed by app name, so you can restart the upload from index 0 with new totals.",
+            }, null, 2),
+          }],
+          isError: true,
+        };
+      }
 
       // --- Multi-part chunk upload ---
       // If 'chunk' is present, buffer it server-side. Non-final chunks return
