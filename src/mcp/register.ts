@@ -7,6 +7,7 @@ import { inspectProject } from "@/engine/rules";
 import { buildImage, saveImage } from "@/engine/docker";
 import { generateNginxConfig } from "@/engine/nginx";
 import { provisionStaticSlot, deployStaticSlot, destroyStaticSlot } from "@/engine/warm";
+import { receiveChunk } from "./chunks";
 import { readFile, rm, mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -349,19 +350,70 @@ Recommended project structures:
 - Next.js: Detected automatically. Set output: "standalone" in next.config.
 - Custom Dockerfile: If a Dockerfile is present, it will be used. Ensure it EXPOSEs port 3000.
 
-When using source, create the tar.gz from the project root: tar -czf project.tar.gz -C /path/to/project .`,
+When using source, create the tar.gz from the project root: tar -czf project.tar.gz -C /path/to/project .
+
+For large source payloads, use chunk uploads instead of a single 'source' parameter. Pass chunk: { index, total, data } with a portion of the base64 string (≤2KB per chunk recommended). Each non-final chunk returns { received, total, complete: false }. Send the final chunk to trigger the actual deploy. Chunk buffers are keyed by the resolved app name, so name + deployer must stay consistent across chunks.`,
     {
-      name: z.string().optional().describe("App name (required when providing source)"),
+      name: z.string().optional().describe("App name (required when providing source or chunk)"),
       domain: z.string().optional().describe("Override domain"),
       env: z.record(z.string(), z.string()).optional().describe("Environment variables as key-value pairs"),
       deployer: z.string().optional().describe("Name of the person deploying (used in subdomain, e.g. 'alice')"),
-      source: z.string().optional().describe("Base64-encoded tar.gz of the project source code. When provided, the project is unpacked and deployed on the server."),
+      source: z.string().optional().describe("Base64-encoded tar.gz of the project source code. When provided, the project is unpacked and deployed on the server. For payloads over a few KB, prefer 'chunk' instead — agents stream large tool arguments slowly."),
+      chunk: z.object({
+        index: z.number().int().min(0).describe("Zero-based chunk index"),
+        total: z.number().int().min(1).max(1000).describe("Total number of chunks (1-1000)"),
+        data: z.string().describe("This chunk's portion of the full base64-encoded tar.gz"),
+      }).optional().describe("Multi-part upload chunk. Buffered server-side keyed by app name; when all chunks arrive, the full source is assembled and the deploy runs. Use this instead of 'source' for payloads >~4KB."),
     },
-    async ({ name, domain, env: envInput, deployer, source }) => {
+    async ({ name, domain, env: envInput, deployer, source, chunk }) => {
       const { config, error } = getConfigOrError();
       if (error) return { content: [{ type: "text", text: error }] };
 
       const provider = resolveProvider(config!);
+
+      // --- Multi-part chunk upload ---
+      // If 'chunk' is present, buffer it server-side. Non-final chunks return
+      // a progress receipt and short-circuit. The final chunk assembles the
+      // full source and falls through into the normal deploy flow below.
+      if (chunk) {
+        if (!name) {
+          return {
+            content: [{ type: "text", text: "Error: 'name' is required when uploading chunks" }],
+            isError: true,
+          };
+        }
+        const chunkKey = deployer
+          ? `${slugify(name)}-${slugify(deployer)}`
+          : slugify(name);
+        try {
+          const receipt = receiveChunk(chunkKey, chunk.index, chunk.total, chunk.data);
+          if (!receipt.complete) {
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  received: receipt.received,
+                  total: receipt.total,
+                  complete: false,
+                }, null, 2),
+              }],
+            };
+          }
+          // Complete — substitute the assembled payload into `source` and
+          // let the rest of the handler run as if a single `source` had been
+          // passed in the first place.
+          source = receipt.assembled;
+        } catch (err) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ error: "chunk upload failed", message: err instanceof Error ? err.message : String(err) }, null, 2),
+            }],
+            isError: true,
+          };
+        }
+      }
+      // --- End chunk upload. `source` is now populated if upload completed. ---
 
       // --- Warm-slot fast path ---
       if (name) {
