@@ -454,18 +454,21 @@ Recommended project structures for dynamic apps:
 
 When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
     {
-      name: z.string().optional().describe("App name (required when providing source, chunk, or uploadId). Must be consistent across all chunks for one upload."),
+      // Order: metadata → payload paths (fastest first → last-resort last).
+      // Many MCP clients render fields in declaration order, so putting
+      // uploadId above source/chunk keeps the preferred path front-of-mind.
+      name: z.string().optional().describe("App name (required when providing uploadId, source, or chunk). Must be consistent across all chunks for one upload."),
       domain: z.string().optional().describe("Override domain"),
       env: z.record(z.string(), z.string()).optional().describe("Environment variables as key-value pairs"),
       deployer: z.string().optional().describe("Name of the person deploying (used in subdomain, e.g. 'alice'). Must be consistent across all chunks."),
-      uploadId: z.string().optional().describe("FASTEST upload path. ID returned by a prior POST to the MCP server's /upload endpoint — the agent curls the tarball bytes there, gets back an uploadId, and references it here. Bypasses the tool-call emission path entirely; sub-second for any payload up to 10MB. Use this for anything non-trivial."),
-      source: z.string().optional().describe("FALLBACK for tiny payloads ≤8KB. Base64-encoded tar.gz. Rejected with instructions if over 8192 bytes. Prefer uploadId or chunk for anything larger."),
+      uploadId: z.string().optional().describe("FASTEST upload path (preferred for everything non-trivial). ID returned by a prior POST to the MCP server's /upload endpoint — the agent curls the raw tarball bytes there in Bash, gets back an uploadId, and references it here. Bypasses the tool-call emission path entirely; sub-second for any payload up to 10MB. /upload accepts any bytes — gzip validity is checked at deploy time, not upload time, so an invalid tarball won't surface until this call."),
+      source: z.string().optional().describe("SIMPLE path for tiny payloads ≤8KB. Base64-encoded tar.gz. Rejected with instructions if over 8192 bytes — switch to uploadId for anything larger."),
       chunk: z.object({
         index: z.number().int().min(0).describe("Zero-based chunk index"),
         total: z.number().int().min(1).max(1000).describe("Total number of chunks (1-1000)"),
         data: z.string().describe("This chunk's slice of the full base64-encoded tar.gz. Max 4096 chars (server enforces); ~2048 recommended."),
         sha256Full: z.string().length(16).optional().describe("Optional integrity check on the final chunk: first 16 hex chars of SHA-256 over the FULL concatenated base64 payload (not this chunk alone). If provided on the final chunk, the server compares it to its own hash of the assembled payload and rejects on mismatch. Use this to catch wire corruption."),
-      }).optional().describe("FALLBACK upload path when /upload isn't available (e.g. stdio-only MCP). Multi-part chunked upload — each call carries one slice of the base64. Slower than uploadId because the LLM still emits every chunk token-by-token. The final chunk triggers the real deploy."),
+      }).optional().describe("LAST-RESORT upload path for stdio-only MCPs or networks where /upload isn't reachable. Multi-part chunked base64 upload — each call carries one slice. Slower than uploadId because the LLM still emits every chunk token-by-token. The final chunk triggers the real deploy. Known issue: certain chunk boundaries may produce server-side CRC errors; if that happens, retry with smaller chunks or switch to uploadId."),
     },
     async ({ name, domain, env: envInput, deployer, source, chunk, uploadId }) => {
       const { config, error } = getConfigOrError();
@@ -652,7 +655,17 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
       // --- End warm-slot fast path. Falls through to existing container path. ---
 
       const steps: string[] = [];
+      const timings: Array<{ name: string; durationMs: number }> = [];
       let stage = "setup";
+      const deployT0 = performance.now();
+      const step = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+        const t0 = performance.now();
+        try {
+          return await fn();
+        } finally {
+          timings.push({ name, durationMs: Math.round(performance.now() - t0) });
+        }
+      };
 
       try {
         // Determine project directory
@@ -663,19 +676,21 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
           }
           stage = "unpack_source";
           projectDir = join(cwd, name);
-          await mkdir(projectDir, { recursive: true });
-          const tarball =
-            typeof payload === "string" ? Buffer.from(payload, "base64") : Buffer.from(payload);
-          const tarPath = join(tmpdir(), `deploy-${name}-${Date.now()}.tar.gz`);
-          await writeFile(tarPath, tarball);
-          await $`tar -xzf ${tarPath} -C ${projectDir}`.quiet();
-          await rm(tarPath, { force: true });
+          await step("unpack", async () => {
+            await mkdir(projectDir, { recursive: true });
+            const tarball =
+              typeof payload === "string" ? Buffer.from(payload, "base64") : Buffer.from(payload);
+            const tarPath = join(tmpdir(), `deploy-${name}-${Date.now()}.tar.gz`);
+            await writeFile(tarPath, tarball);
+            await $`tar -xzf ${tarPath} -C ${projectDir}`.quiet();
+            await rm(tarPath, { force: true });
+          });
           steps.push(`Unpacked source to ${projectDir}`);
         }
 
         // 1. Inspect project
         stage = "inspect_project";
-        const deployConfig = await inspectProject(projectDir);
+        const deployConfig = await step("inspect", () => inspectProject(projectDir));
         const appName = name || deployConfig.name;
         const deployerSlug = deployer ? slugify(deployer) : null;
         const subdomainName = deployerSlug ? `${appName}-${deployerSlug}` : appName;
@@ -700,68 +715,97 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
         } catch {}
         if (envInput) Object.assign(envVars, envInput);
 
-        // 3. Build image
+        // 3. Build image. Skip --platform on host provider: the build
+        // runs directly on the droplet (same architecture), so forcing
+        // --platform linux/amd64 can push the build through buildx/qemu
+        // and invalidate the default layer cache.
         stage = "image_build";
         const imageTag = `dovu-app-paas-${appName}:${Date.now().toString(36)}`;
-        const platform = provider.name === "local" ? undefined : "linux/amd64";
-        await buildImage(projectDir, imageTag, deployConfig.dockerfile, {
-          runtime: deployConfig.runtime,
-          framework: deployConfig.framework,
-          entrypoint: deployConfig.entrypoint,
-          port: deployConfig.port,
-        }, platform);
+        const platform =
+          provider.name === "local" || provider.name === "host" ? undefined : "linux/amd64";
+        await step("docker_build", () =>
+          buildImage(
+            projectDir,
+            imageTag,
+            deployConfig.dockerfile,
+            {
+              runtime: deployConfig.runtime,
+              framework: deployConfig.framework,
+              entrypoint: deployConfig.entrypoint,
+              port: deployConfig.port,
+            },
+            platform,
+          ),
+        );
         steps.push(`Built image: ${imageTag}`);
 
-        // 4. Ship image
+        // 4. Ship image. For host provider the build runs in the same
+        // Docker daemon that will run the container, so save → transfer →
+        // load is a pointless same-daemon round-trip (free for small
+        // images, 5-10s for a real runtime base like node:20-alpine).
+        // Skip it on host. Other providers still need the hop.
         stage = "image_transfer";
-        const tarballPath = join(tmpdir(), `dovu-app-paas-${appName}.tar`);
-        await saveImage(imageTag, tarballPath);
-        await provider.transferImage(tarballPath);
-        await rm(tarballPath, { force: true });
-        steps.push("Image transferred to target");
+        if (provider.name !== "host") {
+          await step("image_transfer", async () => {
+            const tarballPath = join(tmpdir(), `dovu-app-paas-${appName}.tar`);
+            await saveImage(imageTag, tarballPath);
+            await provider.transferImage(tarballPath);
+            await rm(tarballPath, { force: true });
+          });
+          steps.push("Image transferred to target");
+        } else {
+          steps.push("Image already in target daemon (host provider — skipped save/load)");
+        }
 
         // 5. Stop old container
         stage = "stop_old_container";
         const state = await readState(cwd);
         const existing = state.deployments[appName];
         const containerName = `dovu-app-paas-${appName}`;
-        try {
-          await provider.exec(`docker stop ${containerName}`);
-          await provider.exec(`docker rm ${containerName}`);
-        } catch {}
+        await step("stop_old_container", async () => {
+          try {
+            await provider.exec(`docker stop ${containerName}`);
+            await provider.exec(`docker rm ${containerName}`);
+          } catch {}
+        });
 
         // 6. Find free port and start container
         stage = "start_container";
         let hostPort = existing?.hostPort || await getNextPort(cwd);
-        try {
-          const portsOutput = await provider.exec(
-            `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*:\\([0-9]*\\)->.*/\\1/p' | sort -u`
-          );
-          const used = new Set(portsOutput.trim().split("\n").filter(Boolean).map(Number));
-          while (used.has(hostPort)) hostPort++;
-        } catch {}
+        let containerId = "";
+        await step("start_container", async () => {
+          try {
+            const portsOutput = await provider.exec(
+              `docker ps --format '{{.Ports}}' | sed 's/,/\\n/g' | sed -n 's/.*:\\([0-9]*\\)->.*/\\1/p' | sort -u`,
+            );
+            const used = new Set(portsOutput.trim().split("\n").filter(Boolean).map(Number));
+            while (used.has(hostPort)) hostPort++;
+          } catch {}
 
-        const envFlags = Object.entries(envVars).map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`).join(" ");
-        const containerId = (
-          await provider.exec(
-            `docker run -d --name ${containerName} -p 127.0.0.1:${hostPort}:${deployConfig.port} --memory=256m --cpus=0.5 --restart=unless-stopped ${envFlags} ${imageTag}`
-          )
-        ).trim();
-        steps.push(`Container started: ${containerId.slice(0, 12)}`);
+          const envFlags = Object.entries(envVars).map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`).join(" ");
+          containerId = (
+            await provider.exec(
+              `docker run -d --name ${containerName} -p 127.0.0.1:${hostPort}:${deployConfig.port} --memory=256m --cpus=0.5 --restart=unless-stopped ${envFlags} ${imageTag}`,
+            )
+          ).trim();
+          steps.push(`Container started: ${containerId.slice(0, 12)}`);
+        });
 
         // 7. Configure nginx
         stage = "configure_nginx";
         const deployDomain = domain || `${subdomainName}.${provider.baseDomain}`;
-        const nginxConf = generateNginxConfig({
-          serverName: deployDomain,
-          hostPort,
-          ssl: provider.ssl ?? undefined,
+        await step("configure_nginx", async () => {
+          const nginxConf = generateNginxConfig({
+            serverName: deployDomain,
+            hostPort,
+            ssl: provider.ssl ?? undefined,
+          });
+          const confB64 = Buffer.from(nginxConf).toString("base64");
+          await provider.exec(
+            `echo '${confB64}' | base64 -d > ${provider.nginxConfDir}/dovu-app-paas-${appName}.conf`,
+          );
+          await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
         });
-        const confB64 = Buffer.from(nginxConf).toString("base64");
-        await provider.exec(
-          `echo '${confB64}' | base64 -d > ${provider.nginxConfDir}/dovu-app-paas-${appName}.conf`
-        );
-        await provider.exec("nginx -s reload 2>/dev/null || sudo systemctl reload nginx");
         steps.push("Nginx configured");
 
         // 8. Update state
@@ -784,11 +828,19 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
 
         const url = `https://${deployDomain}`;
         steps.push(`Deployed: ${url}`);
+        const totalMs = Math.round(performance.now() - deployT0);
 
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({ url, appName, containerId: containerId.slice(0, 12), steps }, null, 2),
+            text: JSON.stringify({
+              url,
+              appName,
+              containerId: containerId.slice(0, 12),
+              steps,
+              totalMs,
+              timings,
+            }, null, 2),
           }],
         };
       } catch (err) {
@@ -801,6 +853,7 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
               stage,
               message,
               steps,
+              timings,
             }, null, 2),
           }],
           isError: true,
