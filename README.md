@@ -307,6 +307,70 @@ Total wall-clock for an 11 KB site: ~1 second (upload ~0.6s over TLS, deploy ~0.
 bun test
 ```
 
+## Performance benchmarks
+
+Two scripts measure deploy performance against a running droplet. Useful for validating the BuildKit layer cache and for seeing where the time goes after platform changes.
+
+**End-to-end MCP pipeline** — `bun harness/perf-deploy.ts`
+
+Drives the remote MCP through a cold → warm-identical → warm-edited deploy sequence and prints per-stage timings from the server response. Reads URL and bearer from the gitignored `harness/mcp-config.json` so no secrets live in the repo.
+
+```bash
+bun harness/perf-deploy.ts                    # 1 cold + 2 warm, destroy at end
+bun harness/perf-deploy.ts --rounds 5         # 1 cold + 5 warm
+bun harness/perf-deploy.ts --keep             # leave the app running
+bun harness/perf-deploy.ts --name perf-2      # custom app name
+```
+
+Example summary on a 1 vCPU droplet with a ~700 B node hello-world payload:
+
+```
+===== Deploy 1 — cold =====
+[deploy] wall=16069ms  server totalMs=15807
+  docker_build            13048ms    ← includes base-image pull
+  start_container          1754ms
+
+===== Deploy 2 — warm, identical payload =====
+[deploy] wall=12792ms  server totalMs=12452
+  docker_build             7759ms    ← all layers CACHED
+  stop_old_container       3419ms
+
+===== Deploy 3 — warm, edited payload =====
+[deploy] wall=12414ms  server totalMs=11950
+  docker_build             6789ms    ← only COPY . . rebuilds
+[host-skip] Image already in target daemon (host provider — skipped save/load)
+```
+
+**Layer-cache trace** — `./scripts/test-build-cache.sh <ssh-target>`
+
+SSHes into the droplet and runs three bare `docker build` invocations with the same BuildKit flags the engine uses. Greps the CACHED/DONE lines so you can confirm layer cache behavior independent of the MCP pipeline. Requires the SSH target as an argument — nothing is hardcoded.
+
+```bash
+./scripts/test-build-cache.sh root@your-droplet.example.com
+```
+
+Sample output on a warm (all-cached) build:
+
+```
+#7 [2/5] WORKDIR /app                              CACHED
+#8 [3/5] COPY package.json ...                     CACHED
+#9 [4/5] RUN npm install --production ...          CACHED
+#10 [5/5] COPY . .                                 CACHED
+real    0m1.586s
+```
+
+### What to expect
+
+A 1 vCPU droplet with a `node:20-alpine` base, small project, roughly:
+
+| Scenario | `docker_build` | Total deploy |
+|---|---|---|
+| Cold (first deploy of an app) | 13–19 s | 16–24 s |
+| Warm, identical redeploy | 6–8 s | 12–13 s |
+| Warm, one-line code edit | 6–7 s | 11–12 s |
+
+The warm floor is dominated by `docker_build` overhead (buildx session startup, context transfer, manifest generation — ~6 s even when every layer is CACHED) plus `stop_old_container` (~3 s) and `start_container` (~1–3 s). Bare `docker build` with everything cached is ~1.5–3 s on the same hardware; the delta is MCP pipeline overhead. Faster hardware (e.g. an M-series Mac) drops an all-cached `docker build` below 1 s — the last few seconds on the droplet are mostly hardware, not a bug.
+
 ## Tech stack
 
 [Bun](https://bun.sh) / TypeScript / Docker / nginx / MCP / StreamableHTTP
