@@ -6,7 +6,7 @@ import { readState, writeState, getNextPort } from "@/engine/state";
 import { inspectProject } from "@/engine/rules";
 import { buildImage, saveImage } from "@/engine/docker";
 import { generateNginxConfig } from "@/engine/nginx";
-import { provisionStaticSlot, deployStaticSlot } from "@/engine/warm";
+import { provisionStaticSlot, deployStaticSlot, destroyStaticSlot } from "@/engine/warm";
 import { readFile, rm, mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -151,6 +151,26 @@ export function registerTools(server: McpServer, cwd: string) {
       if (error) return { content: [{ type: "text", text: error }] };
 
       const provider = resolveProvider(config!);
+
+      const state = await readState(cwd);
+      const dep = state.deployments[app];
+
+      // --- Warm-slot branch: early return, container path below is untouched ---
+      if (dep?.kind === "static-slot") {
+        const results: string[] = [];
+        try {
+          await destroyStaticSlot(provider, app);
+          results.push("Static slot removed (dir + nginx conf + reload)");
+        } catch (err) {
+          results.push(`Static slot removal failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        delete state.deployments[app];
+        await writeState(cwd, state);
+        results.push("Removed from state");
+        return { content: [{ type: "text", text: `Destroyed '${app}':\n${results.map(r => `  - ${r}`).join("\n")}` }] };
+      }
+      // --- End warm-slot branch ---
+
       const containerName = `dovu-app-paas-${app}`;
       const results: string[] = [];
 
@@ -164,8 +184,6 @@ export function registerTools(server: McpServer, cwd: string) {
       }
 
       // Remove image if known from state
-      const state = await readState(cwd);
-      const dep = state.deployments[app];
       if (dep?.image) {
         try {
           await provider.exec(`docker rmi ${dep.image}`);
