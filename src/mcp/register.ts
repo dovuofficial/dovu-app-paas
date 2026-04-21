@@ -261,9 +261,10 @@ export function registerTools(server: McpServer, cwd: string) {
       const containerName = `dovu-app-paas-${app}`;
       const results: string[] = [];
 
-      // Stop and remove container
+      // Stop and remove container (short grace — we're destroying, no
+      // need to wait the default 10s for SIGTERM to be handled)
       try {
-        await provider.exec(`docker stop ${containerName}`);
+        await provider.exec(`docker stop -t 2 ${containerName}`);
         await provider.exec(`docker rm ${containerName}`);
         results.push("Container removed");
       } catch {
@@ -764,7 +765,12 @@ When creating the tarball: tar -czf project.tar.gz -C /path/to/project .`,
         const containerName = `dovu-app-paas-${appName}`;
         await step("stop_old_container", async () => {
           try {
-            await provider.exec(`docker stop ${containerName}`);
+            // -t 2: give the process 2 seconds to handle SIGTERM before
+            // SIGKILL. Default is 10s, which dominates redeploy latency
+            // (e.g. Node http servers ignore SIGTERM and wait the full
+            // grace period). 2s is enough for a well-behaved process to
+            // flush in-flight requests; the rest get killed.
+            await provider.exec(`docker stop -t 2 ${containerName}`);
             await provider.exec(`docker rm ${containerName}`);
           } catch {}
         });

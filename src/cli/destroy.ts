@@ -57,7 +57,7 @@ export const destroyCommand = new Command("destroy")
 
     // Remove container
     try {
-      await provider.exec(`docker stop ${containerName}`);
+      await provider.exec(`docker stop -t 2 ${containerName}`);
     } catch {}
     try {
       await provider.exec(`docker rm ${containerName}`);
